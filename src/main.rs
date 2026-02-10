@@ -23,19 +23,6 @@ impl HtmlResourceServer {
 }
 
 impl ServerHandler for HtmlResourceServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "HTML Resource Server - Provides HTML content from web pages via html:/// URIs"
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder()
-                .enable_resources()
-                .build(),
-            ..Default::default()
-        }
-    }
-
     async fn list_resource_templates(
         &self,
         _params: Option<PaginatedRequestParams>,
@@ -64,20 +51,34 @@ impl ServerHandler for HtmlResourceServer {
         params: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        let content = self.fetcher.handle_read(&params.uri).await.map_err(|e| McpError {
-            code: ErrorCode(-32603),
-            message: Cow::Owned(e.to_string()),
-            data: None,
-        })?;
+        match self.fetcher.handle_read(&params.uri).await {
+            Ok(content) => Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: params.uri.clone(),
+                    mime_type: Some("text/html".to_string()),
+                    text: content.html().to_string(),
+                    meta: None,
+                }],
+            }),
+            Err(e) => Err(McpError {
+                code: ErrorCode(-32603),
+                message: Cow::Owned(e.to_string()),
+                data: None,
+            }),
+        }
+    }
 
-        Ok(ReadResourceResult {
-            contents: vec![ResourceContents::TextResourceContents {
-                uri: params.uri.clone(),
-                mime_type: Some("text/html".to_string()),
-                text: content.html().to_string(),
-                meta: None,
-            }],
-        })
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some(
+                "HTML Resource Server - Provides HTML content from web pages via html:/// URIs"
+                    .into(),
+            ),
+            capabilities: ServerCapabilities::builder()
+                .enable_resources()
+                .build(),
+            ..Default::default()
+        }
     }
 }
 
