@@ -100,7 +100,7 @@ The client automatically waits for JavaScript to render (default 1000ms, configu
 
 **Resources Provided:**
 1. **html**: Read HTML content from any webpage
-   - URI pattern: `html:///{url}`
+   - URI pattern: Direct URL (e.g., `https://example.com`)
    - Returns: Raw HTML content from the specified URL
    - Use case: Deliver webpage content as data for AI consumption
 

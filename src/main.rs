@@ -29,11 +29,11 @@ impl ServerHandler for HtmlResourceServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         let template = RawResourceTemplate {
-            uri_template: "html:///{url}".to_string(),
+            uri_template: "{url}".to_string(),
             name: "HTML Page Content".to_string(),
             title: None,
             description: Some(
-                "Fetch HTML content from any URL. Use html:///https://example.com".to_string(),
+                "Fetch HTML content from any URL. Use https://example.com".to_string(),
             ),
             mime_type: Some("text/html".to_string()),
             icons: None,
@@ -71,7 +71,7 @@ impl ServerHandler for HtmlResourceServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "HTML Resource Server - Provides HTML content from web pages via html:/// URIs"
+                "HTML Resource Server - Provides HTML content from web pages via direct URLs"
                     .into(),
             ),
             capabilities: ServerCapabilities::builder()
@@ -85,7 +85,7 @@ impl ServerHandler for HtmlResourceServer {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("MCP Web Porter - HTML Resource Server");
-    println!("Ready to serve HTML resources via html:/// URIs");
+    println!("Ready to serve HTML resources via direct URLs");
 
     let service = HtmlResourceServer::new()
         .serve(transport::io::stdio())

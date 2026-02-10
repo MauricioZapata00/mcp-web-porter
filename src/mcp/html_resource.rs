@@ -27,9 +27,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_handle_read_valid_uri() {
+    async fn test_handle_read_valid_https_url() {
         let handler = HtmlResourceHandler::new();
-        let result = handler.handle_read("html:///https://example.com").await;
+        let result = handler.handle_read("https://example.com").await;
         assert!(result.is_ok());
         let content = result.unwrap();
         assert_eq!(content.url(), "https://example.com");
@@ -37,24 +37,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_read_invalid_uri_scheme() {
+    async fn test_handle_read_valid_http_url() {
         let handler = HtmlResourceHandler::new();
-        let result = handler.handle_read("http:///https://example.com").await;
+        let result = handler.handle_read("http://example.com").await;
+        assert!(result.is_ok());
+        let content = result.unwrap();
+        assert_eq!(content.url(), "http://example.com");
+        assert!(!content.html().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_handle_read_invalid_url_scheme() {
+        let handler = HtmlResourceHandler::new();
+        let result = handler.handle_read("ftp://example.com").await;
         assert!(result.is_err());
+        match result {
+            Err(HtmlError::InvalidUrl(_)) => {}
+            _ => panic!("Expected InvalidUrl error for unsupported scheme"),
+        }
     }
 
     #[tokio::test]
     async fn test_handle_read_empty_url() {
         let handler = HtmlResourceHandler::new();
-        let result = handler.handle_read("html:///").await;
+        let result = handler.handle_read("").await;
         assert!(result.is_err());
+        match result {
+            Err(HtmlError::InvalidUrl(_)) => {}
+            _ => panic!("Expected InvalidUrl error for empty URL"),
+        }
     }
 
     #[tokio::test]
     async fn test_handle_read_404() {
         let handler = HtmlResourceHandler::new();
         let result = handler
-            .handle_read("html:///https://httpbin.org/status/404")
+            .handle_read("https://httpbin.org/status/404")
             .await;
         assert!(result.is_err());
         match result {

@@ -3,21 +3,20 @@ use crate::types::{HtmlContent, HtmlError};
 pub async fn fetch_html(url: &str) -> Result<HtmlContent, HtmlError> {
     let client = reqwest::Client::new();
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| HtmlError::FetchError(e.to_string()))?;
+    let response = match client.get(url).send().await {
+        Ok(resp) => resp,
+        Err(e) => return Err(HtmlError::FetchError(e.to_string())),
+    };
 
     let status = response.status();
     if !status.is_success() {
         return Err(HtmlError::HttpError(status.as_u16()));
     }
 
-    let html = response
-        .text()
-        .await
-        .map_err(|e| HtmlError::FetchError(e.to_string()))?;
+    let html = match response.text().await {
+        Ok(text) => text,
+        Err(e) => return Err(HtmlError::FetchError(e.to_string())),
+    };
 
     Ok(HtmlContent::new(url.to_string(), html))
 }
