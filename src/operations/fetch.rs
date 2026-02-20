@@ -1,7 +1,10 @@
 use crate::types::{HtmlContent, HtmlError};
 
 pub async fn fetch_html(url: &str) -> Result<HtmlContent, HtmlError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| HtmlError::FetchError(e.to_string()))?;
 
     let response = match client.get(url).send().await {
         Ok(resp) => resp,
@@ -27,11 +30,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_html_valid_url() {
-        let result = fetch_html("https://example.com").await;
+        let result = fetch_html("https://httpbin.org/html").await;
         assert!(result.is_ok());
         let content = result.unwrap();
-        assert_eq!(content.url(), "https://example.com");
-        assert!(content.html().contains("Example Domain") || content.html().contains("<html"));
+        assert_eq!(content.url(), "https://httpbin.org/html");
+        assert!(content.html().contains("<html") || content.html().contains("<HTML"));
     }
 
     #[tokio::test]

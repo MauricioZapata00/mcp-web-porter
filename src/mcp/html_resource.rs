@@ -29,10 +29,10 @@ mod tests {
     #[tokio::test]
     async fn test_handle_read_valid_https_url() {
         let handler = HtmlResourceHandler::new();
-        let result = handler.handle_read("https://example.com").await;
+        let result = handler.handle_read("https://httpbin.org/html").await;
         assert!(result.is_ok());
         let content = result.unwrap();
-        assert_eq!(content.url(), "https://example.com");
+        assert_eq!(content.url(), "https://httpbin.org/html");
         assert!(!content.html().is_empty());
     }
 

@@ -84,8 +84,8 @@ impl ServerHandler for HtmlResourceServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("MCP Web Porter - HTML Resource Server");
-    println!("Ready to serve HTML resources via direct URLs");
+    eprintln!("MCP Web Porter - HTML Resource Server");
+    eprintln!("Ready to serve HTML resources via direct URLs");
 
     let service = HtmlResourceServer::new()
         .serve(transport::io::stdio())
