@@ -25,12 +25,11 @@ This project uses the official **[Model Context Protocol Rust SDK](https://githu
 **Type:** Hybrid Module-Centric with Type-Driven Development
 ```
 mcp-web-porter/
-├── crates/
-│   ├── types/              # Core domain types (type-driven!)
-│   ├── operations/         # Pure business logic
-│   ├── browser/            # Chrome DevTools Protocol client
-│   ├── mcp/                # MCP protocol implementation using rust-sdk
-│   └── server/             # Application composition
+├── types/          # Core domain types with compile-time guarantees (type-driven!)
+├── operations/     # Pure business logic (testable without mocks)
+├── browser/        # Chrome DevTools Protocol client
+├── mcp/            # MCP protocol implementation using rust-sdk
+└── server/         # Application composition
 ```
 
 ### Key Design Principles

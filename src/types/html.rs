@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 pub struct HtmlContent {
     pub url: String,
     pub html: String,
+    pub text: String,
 }
 
 impl HtmlContent {
-    pub fn new(url: String, html: String) -> Self {
-        Self { url, html }
+    pub fn new(url: String, html: String, text: String) -> Self {
+        Self { url, html, text }
     }
 
     pub fn url(&self) -> &str {
@@ -17,6 +18,10 @@ impl HtmlContent {
 
     pub fn html(&self) -> &str {
         &self.html
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     pub fn html_length(&self) -> usize {
@@ -33,9 +38,11 @@ mod tests {
         let content = HtmlContent::new(
             "https://example.com".to_string(),
             "<html></html>".to_string(),
+            "Hello world".to_string(),
         );
         assert_eq!(content.url(), "https://example.com");
         assert_eq!(content.html(), "<html></html>");
+        assert_eq!(content.text(), "Hello world");
     }
 
     #[test]
@@ -43,6 +50,7 @@ mod tests {
         let content = HtmlContent::new(
             "https://example.com".to_string(),
             "<html></html>".to_string(),
+            "".to_string(),
         );
         assert_eq!(content.html_length(), 13);
     }
