@@ -26,7 +26,8 @@ impl Default for HtmlResourceHandler {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_read_valid_https_url() {
         let handler = HtmlResourceHandler::new();
         let result = handler.handle_read("https://httpbin.org/html").await;
@@ -36,7 +37,8 @@ mod tests {
         assert!(!content.html().is_empty());
     }
 
-    #[tokio::test]
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_read_valid_http_url() {
         let handler = HtmlResourceHandler::new();
         let result = handler.handle_read("http://example.com").await;
@@ -46,7 +48,7 @@ mod tests {
         assert!(!content.html().is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_read_invalid_url_scheme() {
         let handler = HtmlResourceHandler::new();
         let result = handler.handle_read("ftp://example.com").await;
@@ -57,7 +59,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_read_empty_url() {
         let handler = HtmlResourceHandler::new();
         let result = handler.handle_read("").await;
@@ -68,16 +70,4 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_handle_read_404() {
-        let handler = HtmlResourceHandler::new();
-        let result = handler
-            .handle_read("https://httpbin.org/status/404")
-            .await;
-        assert!(result.is_err());
-        match result {
-            Err(HtmlError::HttpError(404)) => {}
-            _ => panic!("Expected HttpError with 404 status"),
-        }
-    }
 }

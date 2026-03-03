@@ -1,27 +1,63 @@
 use mcp_web_porter::HtmlResourceHandler as HtmlFetcher;
+use mcp_web_porter::operations::fetch_html_with_options;
+use mcp_web_porter::types::ResourceUri;
 use rmcp::{
-    model::*,
-    service::RequestContext,
-    transport,
     ErrorData as McpError,
     RoleServer,
-    ServerHandler, ServiceExt,
+    ServerHandler,
+    ServiceExt,
+    handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters,
+    model::*,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
+    transport,
 };
 use std::borrow::Cow;
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ReadPageParams {
+    #[schemars(description = "The URL to fetch (http:// or https://)")]
+    url: String,
+    #[schemars(description = "Enable stealth mode to bypass bot detection (e.g. news sites)")]
+    stealth: Option<bool>,
+}
 
 #[derive(Clone)]
 pub struct HtmlResourceServer {
     fetcher: HtmlFetcher,
+    tool_router: ToolRouter<Self>,
 }
 
+#[tool_router]
 impl HtmlResourceServer {
     fn new() -> Self {
         Self {
             fetcher: HtmlFetcher::new(),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(description = "Fetch a webpage and return its readable text content with JavaScript \
+                          fully rendered. Set stealth=true to bypass bot detection on heavy \
+                          commercial sites (news portals, paywalls).")]
+    async fn read_page(
+        &self,
+        Parameters(ReadPageParams { url, stealth }): Parameters<ReadPageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let stealth = stealth.unwrap_or(false);
+        let resource_uri = match ResourceUri::parse(&url) {
+            Ok(u) => u,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        };
+        match fetch_html_with_options(resource_uri.url(), stealth).await {
+            Ok(content) => Ok(CallToolResult::success(vec![Content::text(content.text())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }
 }
 
+#[tool_handler]
 impl ServerHandler for HtmlResourceServer {
     async fn list_resource_templates(
         &self,
@@ -30,12 +66,12 @@ impl ServerHandler for HtmlResourceServer {
     ) -> Result<ListResourceTemplatesResult, McpError> {
         let template = RawResourceTemplate {
             uri_template: "{url}".to_string(),
-            name: "HTML Page Content".to_string(),
+            name: "Web Page Text Content".to_string(),
             title: None,
             description: Some(
-                "Fetch HTML content from any URL. Use https://example.com".to_string(),
+                "Fetch and extract readable text from any URL. JavaScript is fully rendered before extraction. Use https://example.com".to_string(),
             ),
-            mime_type: Some("text/html".to_string()),
+            mime_type: Some("text/plain".to_string()),
             icons: None,
         };
 
@@ -55,8 +91,8 @@ impl ServerHandler for HtmlResourceServer {
             Ok(content) => Ok(ReadResourceResult {
                 contents: vec![ResourceContents::TextResourceContents {
                     uri: params.uri.clone(),
-                    mime_type: Some("text/html".to_string()),
-                    text: content.html().to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    text: content.text().to_string(),
                     meta: None,
                 }],
             }),
@@ -71,11 +107,12 @@ impl ServerHandler for HtmlResourceServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "HTML Resource Server - Provides HTML content from web pages via direct URLs"
+                "Web Porter - Provides readable text extracted from web pages. JavaScript-rendered content (SPAs, Docsify, React, Vue) is fully supported."
                     .into(),
             ),
             capabilities: ServerCapabilities::builder()
                 .enable_resources()
+                .enable_tools()
                 .build(),
             ..Default::default()
         }

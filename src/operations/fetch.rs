@@ -1,53 +1,33 @@
+use crate::browser::fetch_rendered_html;
+use super::parse::extract_text;
 use crate::types::{HtmlContent, HtmlError};
 
 pub async fn fetch_html(url: &str) -> Result<HtmlContent, HtmlError> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .build()
-        .map_err(|e| HtmlError::FetchError(e.to_string()))?;
+    fetch_html_with_options(url, false).await
+}
 
-    let response = match client.get(url).send().await {
-        Ok(resp) => resp,
-        Err(e) => return Err(HtmlError::FetchError(e.to_string())),
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(HtmlError::HttpError(status.as_u16()));
-    }
-
-    let html = match response.text().await {
-        Ok(text) => text,
-        Err(e) => return Err(HtmlError::FetchError(e.to_string())),
-    };
-
-    Ok(HtmlContent::new(url.to_string(), html))
+pub async fn fetch_html_with_options(url: &str, stealth: bool) -> Result<HtmlContent, HtmlError> {
+    let html = fetch_rendered_html(url, 1500, stealth).await?;
+    let text = extract_text(&html);
+    Ok(HtmlContent::new(url.to_string(), html, text))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_fetch_html_valid_url() {
         let result = fetch_html("https://httpbin.org/html").await;
         assert!(result.is_ok());
         let content = result.unwrap();
         assert_eq!(content.url(), "https://httpbin.org/html");
         assert!(content.html().contains("<html") || content.html().contains("<HTML"));
+        assert!(!content.text().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_fetch_html_404() {
-        let result = fetch_html("https://httpbin.org/status/404").await;
-        assert!(result.is_err());
-        match result {
-            Err(HtmlError::HttpError(404)) => {}
-            _ => panic!("Expected HttpError with 404 status"),
-        }
-    }
-
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_fetch_html_invalid_url() {
         let result = fetch_html("not-a-valid-url").await;
         assert!(result.is_err());
