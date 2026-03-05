@@ -113,7 +113,7 @@ Example MCP configuration:
 - **MCP SDK Based** - Official Rust SDK for protocol compliance and type safety
 
 ### ⚡ Performance
-- Built on `spider_chromiumoxide_cdp` for high concurrency
+- Built on `chromiumoxide` for high concurrency
 - Semaphore-based session limiting
 - Configurable wait times and timeouts
 - Scales to 100+ concurrent sessions
