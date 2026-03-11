@@ -1,6 +1,7 @@
+use mcp_web_porter::mcp::FormHandler;
 use mcp_web_porter::HtmlResourceHandler as HtmlFetcher;
 use mcp_web_porter::operations::fetch_html_with_options;
-use mcp_web_porter::types::ResourceUri;
+use mcp_web_porter::types::{FieldInput, ResourceUri};
 use rmcp::{
     ErrorData as McpError,
     RoleServer,
@@ -23,18 +24,40 @@ struct ReadPageParams {
     stealth: Option<bool>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DetectFormParams {
+    #[schemars(description = "The URL to navigate to (http:// or https://)")]
+    url: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct FillFormParams {
+    #[schemars(description = "The URL of the page with the form (http:// or https://)")]
+    url: String,
+    #[schemars(description = "Fields to fill, each with identifier and value")]
+    fields: Vec<FieldInput>,
+    #[schemars(description = "Submit the form automatically after filling")]
+    auto_submit: Option<bool>,
+    #[schemars(description = "Click a continuation button by its text label instead of submitting")]
+    submit_button_label: Option<String>,
+    #[schemars(description = "Preview planned changes without touching the DOM")]
+    dry_run: Option<bool>,
+}
+
 #[derive(Clone)]
 pub struct HtmlResourceServer {
-    fetcher: HtmlFetcher,
-    tool_router: ToolRouter<Self>,
+    fetcher:      HtmlFetcher,
+    form_handler: FormHandler,
+    tool_router:  ToolRouter<Self>,
 }
 
 #[tool_router]
 impl HtmlResourceServer {
     fn new() -> Self {
         Self {
-            fetcher: HtmlFetcher::new(),
-            tool_router: Self::tool_router(),
+            fetcher:      HtmlFetcher::new(),
+            form_handler: FormHandler::default(),
+            tool_router:  Self::tool_router(),
         }
     }
 
@@ -52,6 +75,54 @@ impl HtmlResourceServer {
         };
         match fetch_html_with_options(resource_uri.url(), stealth).await {
             Ok(content) => Ok(CallToolResult::success(vec![Content::text(content.text())])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Navigate to a URL and detect all form fields and buttons present after \
+                          JavaScript renders.")]
+    async fn detect_form(
+        &self,
+        Parameters(DetectFormParams { url }): Parameters<DetectFormParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.form_handler.handle_detect(&url).await {
+            Ok(step) => {
+                let text = serde_json::to_string_pretty(&step)
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Fill form fields on a web page and optionally submit. Supports \
+                          dry_run preview and continuation buttons.")]
+    async fn fill_form(
+        &self,
+        Parameters(FillFormParams {
+            url,
+            fields,
+            auto_submit,
+            submit_button_label,
+            dry_run,
+        }): Parameters<FillFormParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .form_handler
+            .handle_fill(
+                &url,
+                fields,
+                auto_submit.unwrap_or(false),
+                submit_button_label,
+                dry_run.unwrap_or(false),
+            )
+            .await
+        {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }
