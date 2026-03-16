@@ -36,12 +36,29 @@ const DETECT_JS: &str = r#"(() => {
       required: el.required, options,
     };
   });
+  const btnLabel = el => {
+    const txt = el.textContent.trim().replace(/\s+/g,' ');
+    if (txt) return txt;
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria;
+    const title = el.getAttribute('title');
+    if (title) return title;
+    const svgTitle = el.querySelector('svg title');
+    if (svgTitle && svgTitle.textContent.trim()) return svgTitle.textContent.trim();
+    const img = el.querySelector('img[alt]');
+    if (img && img.alt) return img.alt;
+    return null;
+  };
   const buttons = Array.from(
     document.querySelectorAll('button,input[type="submit"],input[type="button"],a[href]')
-  ).filter(el => el.textContent.trim()).map((el, i) => ({
-    label: el.textContent.trim().replace(/\s+/g,' '),
-    selector: el.id ? '#' + CSS.escape(el.id) : el.tagName.toLowerCase() + ':nth-of-type(' + (i+1) + ')',
-  }));
+  ).map((el, i) => {
+    const lbl = btnLabel(el);
+    if (!lbl) return null;
+    return {
+      label: lbl,
+      selector: el.id ? '#' + CSS.escape(el.id) : el.tagName.toLowerCase() + ':nth-of-type(' + (i+1) + ')',
+    };
+  }).filter(b => b !== null);
   return JSON.stringify({fields, buttons});
 })()"#;
 
@@ -598,5 +615,78 @@ mod tests {
         let result = mock.click_button_by_id_or_label(None::<String>, None::<String>).await;
 
         assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_detect_aria_label_button_flows_through() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((
+            vec![],
+            vec![FormButton { label: "Search".to_string(), selector: "#search-btn".to_string() }],
+        )));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Search");
+        assert_eq!(buttons[0].selector, "#search-btn");
+    }
+
+    #[tokio::test]
+    async fn test_detect_svg_title_button_flows_through() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((
+            vec![],
+            vec![FormButton { label: "Close".to_string(), selector: "button:nth-of-type(1)".to_string() }],
+        )));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Close");
+    }
+
+    #[tokio::test]
+    async fn test_detect_img_alt_button_flows_through() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((
+            vec![],
+            vec![FormButton { label: "Cart".to_string(), selector: "a:nth-of-type(1)".to_string() }],
+        )));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Cart");
+    }
+
+    #[tokio::test]
+    async fn test_detect_no_label_button_excluded() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((vec![], vec![])));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert!(buttons.is_empty());
     }
 }
