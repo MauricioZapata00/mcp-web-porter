@@ -1,8 +1,8 @@
 use crate::browser::{BrowserOps, ChromiumBrowser};
 use crate::operations::{extract_text, resolve_field, validate_inputs};
 use crate::types::{
-    FieldInput, FieldPreview, FilledField, FormFillResult, FormPreview, FormStep, HtmlError,
-    ResourceUri,
+    ClickButtonResult, FieldInput, FieldPreview, FilledField,
+    FormFillResult, FormPreview, FormStep, HtmlError, ResourceUri,
 };
 
 #[derive(Clone, Default)]
@@ -13,6 +13,25 @@ impl FormHandler {
         ResourceUri::parse(url)?;
         let mut driver = ChromiumBrowser::new(false);
         let result = detect_with_ops(url, &mut driver).await;
+        driver.cleanup().await;
+        result
+    }
+
+    pub async fn handle_click_button(
+        &self,
+        url:       &str,
+        button_id: Option<String>,
+        label:     Option<String>,
+    ) -> Result<ClickButtonResult, HtmlError> {
+        ResourceUri::parse(url)?;
+        let mut driver = ChromiumBrowser::new(false);
+        let result = click_button_with_ops(
+            url,
+            button_id.as_deref(),
+            label.as_deref(),
+            &mut driver,
+        )
+        .await;
         driver.cleanup().await;
         result
     }
@@ -134,12 +153,39 @@ pub(crate) async fn fill_with_ops(
     })
 }
 
+pub(crate) async fn click_button_with_ops(
+    url:       &str,
+    button_id: Option<&str>,
+    label:     Option<&str>,
+    ops:       &mut impl BrowserOps,
+) -> Result<ClickButtonResult, HtmlError> {
+    if button_id.is_none() && label.is_none() {
+        return Err(HtmlError::ButtonNotFound("button_id and label are both None".into()));
+    }
+    ops.start().await?;
+    ops.open(url).await?;
+    ops.read(1500).await?;
+    let (clicked_button, resolved_by) = ops.click_button_by_id_or_label(
+        button_id.map(|s| s.to_owned()),
+        label.map(|s| s.to_owned()),
+    ).await?;
+    let html = ops.read(1000).await?;
+    let page_text_after = extract_text(&html);
+    let (next_fields, next_buttons) = ops.detect_fields().await?;
+    let next_step = if next_fields.is_empty() {
+        None
+    } else {
+        Some(FormStep { fields: next_fields, buttons: next_buttons })
+    };
+    Ok(ClickButtonResult { clicked_button, resolved_by, page_text_after, next_step })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::browser::page::MockBrowserOps;
     use crate::types::{
-        FieldValue, FormButton, FormField, FormFieldType,
+        ButtonResolvedBy, FieldValue, FormButton, FormField, FormFieldType,
     };
 
     fn make_text_field(name: &str) -> FormField {
@@ -281,6 +327,106 @@ mod tests {
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
+    // ── Mock-based tests for click_button_with_ops ────────────────────────────
+
+    #[tokio::test]
+    async fn test_click_button_both_none_returns_error() {
+        let mut mock = MockBrowserOps::new();
+        let result = click_button_with_ops("https://example.com", None, None, &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_button_by_id_or_label_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Err(HtmlError::ButtonNotFound("by id 'btn'".to_string())));
+
+        let result = click_button_with_ops("https://example.com", Some("btn"), None, &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_button_read_after_click_error() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read()
+            .times(1)
+            .returning(|_| Ok("<html/>".to_string()));
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Ok((
+                FormButton { label: "Go".to_string(), selector: "#go".to_string() },
+                ButtonResolvedBy::Id,
+            )));
+        mock.expect_read()
+            .times(1)
+            .returning(|_| Err(HtmlError::BrowserError("read failed".to_string())));
+
+        let result = click_button_with_ops("https://example.com", Some("go"), None, &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_button_detect_after_click_error() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Ok((
+                FormButton { label: "Go".to_string(), selector: "#go".to_string() },
+                ButtonResolvedBy::Label,
+            )));
+        mock.expect_detect_fields()
+            .returning(|| Err(HtmlError::BrowserError("detect failed".to_string())));
+
+        let result = click_button_with_ops("https://example.com", None, Some("Go"), &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_button_returns_next_step_when_fields_present() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Ok((
+                FormButton { label: "Next".to_string(), selector: "#next".to_string() },
+                ButtonResolvedBy::Id,
+            )));
+        mock.expect_detect_fields()
+            .returning(|| Ok((vec![make_text_field("step2_name")], vec![])));
+
+        let result = click_button_with_ops("https://example.com", Some("next"), None, &mut mock).await;
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(r.next_step.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_click_button_returns_no_next_step_when_no_fields() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Ok((
+                FormButton { label: "Submit".to_string(), selector: "button".to_string() },
+                ButtonResolvedBy::Label,
+            )));
+        mock.expect_detect_fields().returning(|| Ok((vec![], vec![])));
+
+        let result = click_button_with_ops("https://example.com", None, Some("Submit"), &mut mock).await;
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(r.next_step.is_none());
+    }
+
     // ── Integration tests (real Chrome) ───────────────────────────────────────
 
     #[serial_test::serial]
@@ -370,5 +516,44 @@ mod tests {
         let r = result.unwrap();
         assert!(r.fields_filled.is_empty());
         assert!(r.preview.is_some());
+    }
+
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_click_button_by_label() {
+        let handler = FormHandler::default();
+        let result = handler
+            .handle_click_button(
+                "https://httpbin.org/forms/post",
+                None,
+                Some("Submit order".to_string()),
+            )
+            .await;
+        assert!(result.is_ok(), "click_button failed: {:?}", result);
+        let r = result.unwrap();
+        assert!(!r.page_text_after.is_empty());
+    }
+
+    #[serial_test::serial]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_handle_click_button_unknown_label() {
+        let handler = FormHandler::default();
+        let result = handler
+            .handle_click_button(
+                "https://httpbin.org/forms/post",
+                None,
+                Some("nonexistent_button_xyz".to_string()),
+            )
+            .await;
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_handle_click_button_both_none() {
+        let handler = FormHandler::default();
+        let result = handler
+            .handle_click_button("https://httpbin.org/forms/post", None, None)
+            .await;
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
     }
 }

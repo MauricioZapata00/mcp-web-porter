@@ -86,6 +86,21 @@ pub struct FieldPreview {
     pub planned_value: FieldValue,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonResolvedBy {
+    Id,
+    Label,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClickButtonResult {
+    pub clicked_button:  FormButton,
+    pub resolved_by:     ButtonResolvedBy,
+    pub page_text_after: String,
+    pub next_step:       Option<FormStep>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +139,33 @@ mod tests {
         let back: FieldInput = serde_json::from_str(&json).unwrap();
         assert_eq!(back.identifier, "username");
         assert!(matches!(back.value, FieldValue::Text(s) if s == "alice"));
+    }
+
+    #[test]
+    fn test_button_resolved_by_id_serialises_to_id() {
+        let json = serde_json::to_string(&ButtonResolvedBy::Id).unwrap();
+        assert_eq!(json, "\"id\"");
+    }
+
+    #[test]
+    fn test_button_resolved_by_label_serialises_to_label() {
+        let json = serde_json::to_string(&ButtonResolvedBy::Label).unwrap();
+        assert_eq!(json, "\"label\"");
+    }
+
+    #[test]
+    fn test_click_button_result_roundtrip() {
+        let result = ClickButtonResult {
+            clicked_button:  FormButton { label: "Submit".to_string(), selector: "#btn".to_string() },
+            resolved_by:     ButtonResolvedBy::Id,
+            page_text_after: "Thank you".to_string(),
+            next_step:       None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ClickButtonResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.clicked_button.label, "Submit");
+        assert_eq!(back.page_text_after, "Thank you");
+        assert!(matches!(back.resolved_by, ButtonResolvedBy::Id));
+        assert!(back.next_step.is_none());
     }
 }

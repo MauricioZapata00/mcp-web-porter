@@ -44,6 +44,16 @@ struct FillFormParams {
     dry_run: Option<bool>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ClickButtonParams {
+    #[schemars(description = "The URL of the page containing the button (http:// or https://)")]
+    url: String,
+    #[schemars(description = "The HTML id attribute of the button to click")]
+    button_id: Option<String>,
+    #[schemars(description = "Visible text label of the button (case-insensitive partial match)")]
+    label: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct HtmlResourceServer {
     fetcher:      HtmlFetcher,
@@ -88,6 +98,23 @@ impl HtmlResourceServer {
         match self.form_handler.handle_detect(&url).await {
             Ok(step) => {
                 let text = serde_json::to_string_pretty(&step)
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Find and click a button on a web page by its HTML id or visible text \
+                          label. Returns the resolved button, how it was found, the page text \
+                          after clicking, and any new form fields that appear.")]
+    async fn click_button(
+        &self,
+        Parameters(ClickButtonParams { url, button_id, label }): Parameters<ClickButtonParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.form_handler.handle_click_button(&url, button_id, label).await {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "{}".to_string());
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
