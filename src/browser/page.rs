@@ -1,6 +1,8 @@
 use chromiumoxide::{Browser, BrowserConfig};
 use futures::StreamExt;
-use crate::types::{FieldValue, FormButton, FormField, FormFieldType, HtmlError, SelectOption};
+use crate::types::{
+    ButtonResolvedBy, FieldValue, FormButton, FormField, FormFieldType, HtmlError, SelectOption,
+};
 
 const DETECT_JS: &str = r#"(() => {
   const toSel = (el, i) => {
@@ -34,12 +36,29 @@ const DETECT_JS: &str = r#"(() => {
       required: el.required, options,
     };
   });
+  const btnLabel = el => {
+    const txt = el.textContent.trim().replace(/\s+/g,' ');
+    if (txt) return txt;
+    const aria = el.getAttribute('aria-label');
+    if (aria) return aria;
+    const title = el.getAttribute('title');
+    if (title) return title;
+    const svgTitle = el.querySelector('svg title');
+    if (svgTitle && svgTitle.textContent.trim()) return svgTitle.textContent.trim();
+    const img = el.querySelector('img[alt]');
+    if (img && img.alt) return img.alt;
+    return null;
+  };
   const buttons = Array.from(
     document.querySelectorAll('button,input[type="submit"],input[type="button"],a[href]')
-  ).filter(el => el.textContent.trim()).map((el, i) => ({
-    label: el.textContent.trim().replace(/\s+/g,' '),
-    selector: el.id ? '#' + CSS.escape(el.id) : el.tagName.toLowerCase() + ':nth-of-type(' + (i+1) + ')',
-  }));
+  ).map((el, i) => {
+    const lbl = btnLabel(el);
+    if (!lbl) return null;
+    return {
+      label: lbl,
+      selector: el.id ? '#' + CSS.escape(el.id) : el.tagName.toLowerCase() + ':nth-of-type(' + (i+1) + ')',
+    };
+  }).filter(b => b !== null);
   return JSON.stringify({fields, buttons});
 })()"#;
 
@@ -70,6 +89,14 @@ pub(crate) trait BrowserOps {
 
     /// Click a button matching the given label (case-insensitive partial match).
     async fn click_button(&mut self, label: &str) -> Result<(), HtmlError>;
+
+    /// Find and click a button by exact id first, falling back to label partial match.
+    /// Returns the matched button and which strategy resolved it.
+    async fn click_button_by_id_or_label(
+        &mut self,
+        button_id: Option<String>,
+        label:     Option<String>,
+    ) -> Result<(FormButton, ButtonResolvedBy), HtmlError>;
 }
 
 // ─── Real implementation ──────────────────────────────────────────────────────
@@ -343,6 +370,85 @@ impl BrowserOps for ChromiumBrowser {
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         Ok(())
     }
+
+    async fn click_button_by_id_or_label(
+        &mut self,
+        button_id: Option<String>,
+        label:     Option<String>,
+    ) -> Result<(FormButton, ButtonResolvedBy), HtmlError> {
+        let page = self.page.as_ref()
+            .ok_or_else(|| HtmlError::BrowserError("page not opened".into()))?;
+
+        if let Some(id) = button_id.as_deref() {
+            let id_json = serde_json::to_string(id).unwrap_or_default();
+            let js = format!(
+                "(function(id) {{ \
+                   var el = document.getElementById(id); \
+                   if (!el) return null; \
+                   var tag = el.tagName.toLowerCase(); \
+                   var tp = (el.type || '').toLowerCase(); \
+                   var clickable = tag === 'button' || tag === 'a' \
+                     || (tag === 'input' && (tp === 'submit' || tp === 'button')); \
+                   if (!clickable) return null; \
+                   el.click(); \
+                   return el.textContent.trim().replace(/\\s+/g,' ') || id; \
+                 }})({id_json})"
+            );
+            let result = page.evaluate(js).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            match result.value().and_then(|v| v.as_str().map(|s| s.to_owned())) {
+                Some(text) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    return Ok((
+                        FormButton { label: text, selector: format!("#{}", id) },
+                        ButtonResolvedBy::Id,
+                    ));
+                }
+                None if label.is_none() => {
+                    return Err(HtmlError::ButtonNotFound(format!("by id '{}'", id)));
+                }
+                None => {}
+            }
+        }
+
+        if let Some(lbl) = label {
+            let lbl_json = serde_json::to_string(&lbl).unwrap_or_default();
+            let js = format!(
+                "(function(lbl) {{ \
+                   var els = Array.from(document.querySelectorAll(\
+                     'button,input[type=\"submit\"],input[type=\"button\"],a[href]')); \
+                   var found = els.find(function(el) {{ \
+                     return el.textContent.toLowerCase().includes(lbl.toLowerCase()); \
+                   }}); \
+                   if (!found) return null; \
+                   var text = found.textContent.trim().replace(/\\s+/g,' '); \
+                   var sel = found.id ? '#' + CSS.escape(found.id) \
+                     : found.tagName.toLowerCase(); \
+                   found.click(); \
+                   return JSON.stringify({{ label: text, selector: sel }}); \
+                 }})({lbl_json})"
+            );
+            let result = page.evaluate(js).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            match result.value().and_then(|v| v.as_str().map(|s| s.to_owned())) {
+                Some(json) => {
+                    let btn: FormButton = serde_json::from_str(&json)
+                        .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    return Ok((btn, ButtonResolvedBy::Label));
+                }
+                None => {
+                    let msg = match button_id {
+                        Some(id) => format!("by id '{}' or label '{}'", id, lbl),
+                        None     => format!("by label '{}'", lbl),
+                    };
+                    return Err(HtmlError::ButtonNotFound(msg));
+                }
+            }
+        }
+
+        Err(HtmlError::ButtonNotFound("button_id and label are both None".into()))
+    }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -476,5 +582,111 @@ mod tests {
         let result = mock.read_field_value("#email").await;
 
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_by_id_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Err(HtmlError::ButtonNotFound("by id 'submit-btn'".to_string())));
+
+        let result = mock.click_button_by_id_or_label(Some("submit-btn".to_string()), None).await;
+
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_by_label_fallback_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Err(HtmlError::ButtonNotFound("by label 'Continue'".to_string())));
+
+        let result = mock.click_button_by_id_or_label(None, Some("Continue".to_string())).await;
+
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_both_none_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_click_button_by_id_or_label()
+            .returning(|_, _| Err(HtmlError::ButtonNotFound("button_id and label are both None".to_string())));
+
+        let result = mock.click_button_by_id_or_label(None::<String>, None::<String>).await;
+
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_detect_aria_label_button_flows_through() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((
+            vec![],
+            vec![FormButton { label: "Search".to_string(), selector: "#search-btn".to_string() }],
+        )));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Search");
+        assert_eq!(buttons[0].selector, "#search-btn");
+    }
+
+    #[tokio::test]
+    async fn test_detect_svg_title_button_flows_through() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((
+            vec![],
+            vec![FormButton { label: "Close".to_string(), selector: "button:nth-of-type(1)".to_string() }],
+        )));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Close");
+    }
+
+    #[tokio::test]
+    async fn test_detect_img_alt_button_flows_through() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((
+            vec![],
+            vec![FormButton { label: "Cart".to_string(), selector: "a:nth-of-type(1)".to_string() }],
+        )));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Cart");
+    }
+
+    #[tokio::test]
+    async fn test_detect_no_label_button_excluded() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_detect_fields().returning(|| Ok((vec![], vec![])));
+
+        let result = form_with_ops("https://example.com", 0, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, buttons) = result.unwrap();
+        assert!(buttons.is_empty());
     }
 }

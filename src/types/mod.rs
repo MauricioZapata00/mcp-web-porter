@@ -5,6 +5,7 @@ mod resource_uri;
 
 pub use error::HtmlError;
 pub use form::{
+    ButtonResolvedBy, ClickButtonResult,
     FieldInput, FieldPreview, FieldValue, FilledField,
     FormButton, FormField, FormFieldType, FormFillResult,
     FormPreview, FormStep, SelectOption,
