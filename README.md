@@ -199,6 +199,12 @@ cargo test -- --nocapture
 
 # Run specific test
 cargo test test_render_page
+
+# Run browser integration tests (must be single-threaded to avoid Chrome concurrency failures)
+cargo test -- --test-threads=1
+
+# Run only unit/mock tests (no Chrome required)
+cargo test --lib
 ```
 
 ### Building for Production

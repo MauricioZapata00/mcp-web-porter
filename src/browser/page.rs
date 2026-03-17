@@ -1,7 +1,10 @@
 use chromiumoxide::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::network::CookieParam as CdpCookieParam;
 use futures::StreamExt;
+use std::collections::HashMap;
 use crate::types::{
-    ButtonResolvedBy, FieldValue, FormButton, FormField, FormFieldType, HtmlError, SelectOption,
+    ButtonResolvedBy, Cookie, FieldValue, FormButton, FormField, FormFieldType, HtmlError,
+    RequestOptions, SelectOption,
 };
 
 const DETECT_JS: &str = r#"(() => {
@@ -97,6 +100,12 @@ pub(crate) trait BrowserOps {
         button_id: Option<String>,
         label:     Option<String>,
     ) -> Result<(FormButton, ButtonResolvedBy), HtmlError>;
+
+    /// Set cookies on the current page via CDP before navigation.
+    async fn set_cookies(&mut self, url: &str, cookies: &[Cookie]) -> Result<(), HtmlError>;
+
+    /// Set extra HTTP headers on the current page via CDP before navigation.
+    async fn set_extra_headers(&mut self, headers: &HashMap<String, String>) -> Result<(), HtmlError>;
 }
 
 // ─── Real implementation ──────────────────────────────────────────────────────
@@ -371,6 +380,50 @@ impl BrowserOps for ChromiumBrowser {
         Ok(())
     }
 
+    async fn set_cookies(&mut self, url: &str, cookies: &[Cookie]) -> Result<(), HtmlError> {
+        if cookies.is_empty() {
+            return Ok(());
+        }
+        let page = self.page.as_ref()
+            .ok_or_else(|| HtmlError::BrowserError("page not open".into()))?;
+        for cookie in cookies {
+            let domain = match &cookie.domain {
+                Some(d) => d.clone(),
+                None    => extract_host(url)?,
+            };
+            let path = cookie.path.clone().unwrap_or_else(|| "/".to_string());
+            let cdp_cookie = CdpCookieParam::builder()
+                .name(cookie.name.clone())
+                .value(cookie.value.clone())
+                .domain(domain)
+                .path(path)
+                .build()
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            page.set_cookie(cdp_cookie).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn set_extra_headers(&mut self, headers: &HashMap<String, String>) -> Result<(), HtmlError> {
+        if headers.is_empty() {
+            return Ok(());
+        }
+        let page = self.page.as_ref()
+            .ok_or_else(|| HtmlError::BrowserError("page not open".into()))?;
+        use chromiumoxide::cdp::browser_protocol::network::{
+            Headers as CdpHeaders, SetExtraHttpHeadersParams,
+        };
+        let json_obj: serde_json::Map<String, serde_json::Value> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        page.execute(SetExtraHttpHeadersParams { headers: CdpHeaders::new(serde_json::Value::Object(json_obj)) })
+            .await
+            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        Ok(())
+    }
+
     async fn click_button_by_id_or_label(
         &mut self,
         button_id: Option<String>,
@@ -453,20 +506,63 @@ impl BrowserOps for ChromiumBrowser {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-pub async fn fetch_rendered_html(url: &str, wait_ms: u64, stealth: bool) -> Result<String, HtmlError> {
+fn extract_host(url: &str) -> Result<String, HtmlError> {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .ok_or_else(|| HtmlError::InvalidUrl("URL missing http/https scheme".to_string()))?;
+    let host = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .split('?')
+        .next()
+        .unwrap_or(without_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme);
+    if host.is_empty() {
+        return Err(HtmlError::InvalidUrl("URL has no host".to_string()));
+    }
+    Ok(host.to_string())
+}
+
+pub(crate) async fn apply_request_options(
+    url:     &str,
+    options: Option<&RequestOptions>,
+    ops:     &mut impl BrowserOps,
+) -> Result<(), HtmlError> {
+    let Some(opts) = options else { return Ok(()) };
+    if let Some(cookies) = &opts.cookies {
+        ops.set_cookies(url, cookies).await?;
+    }
+    if let Some(headers) = &opts.headers {
+        ops.set_extra_headers(headers).await?;
+    }
+    Ok(())
+}
+
+pub async fn fetch_rendered_html(
+    url:     &str,
+    wait_ms: u64,
+    stealth: bool,
+    options: Option<&RequestOptions>,
+) -> Result<String, HtmlError> {
     let mut driver = ChromiumBrowser::new(stealth);
-    let result = fetch_with_ops(url, wait_ms, &mut driver).await;
+    let result = fetch_with_ops(url, wait_ms, options, &mut driver).await;
     driver.cleanup().await;
     result
 }
 
-/// Testable core: drives `ops` through start → open → read.
+/// Testable core: drives `ops` through start → apply_request_options → open → read.
 pub(crate) async fn fetch_with_ops(
-    url: &str,
+    url:     &str,
     wait_ms: u64,
-    ops: &mut impl BrowserOps,
+    options: Option<&RequestOptions>,
+    ops:     &mut impl BrowserOps,
 ) -> Result<String, HtmlError> {
     ops.start().await?;
+    apply_request_options(url, options, ops).await?;
     ops.open(url).await?;
     ops.read(wait_ms).await
 }
@@ -474,9 +570,9 @@ pub(crate) async fn fetch_with_ops(
 /// Testable core: start → open → read → detect_fields.
 #[cfg(test)]
 pub(crate) async fn form_with_ops(
-    url: &str,
+    url:    &str,
     wait_ms: u64,
-    ops: &mut impl BrowserOps,
+    ops:     &mut impl BrowserOps,
 ) -> Result<(Vec<FormField>, Vec<FormButton>), HtmlError> {
     ops.start().await?;
     ops.open(url).await?;
@@ -496,7 +592,7 @@ mod tests {
         mock.expect_start()
             .returning(|| Err(HtmlError::BrowserError("config build failed".to_string())));
 
-        let result = fetch_with_ops("https://example.com", 0, &mut mock).await;
+        let result = fetch_with_ops("https://example.com", 0, None, &mut mock).await;
 
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
@@ -508,7 +604,7 @@ mod tests {
         mock.expect_open()
             .returning(|_| Err(HtmlError::BrowserError("new_page failed".to_string())));
 
-        let result = fetch_with_ops("https://example.com", 0, &mut mock).await;
+        let result = fetch_with_ops("https://example.com", 0, None, &mut mock).await;
 
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
@@ -521,7 +617,7 @@ mod tests {
         mock.expect_read()
             .returning(|_| Err(HtmlError::BrowserError("page content failed".to_string())));
 
-        let result = fetch_with_ops("https://example.com", 0, &mut mock).await;
+        let result = fetch_with_ops("https://example.com", 0, None, &mut mock).await;
 
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
@@ -688,5 +784,136 @@ mod tests {
         assert!(result.is_ok());
         let (_, buttons) = result.unwrap();
         assert!(buttons.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_cookies_error_propagates_before_open() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_set_cookies()
+            .returning(|_, _| Err(HtmlError::BrowserError("set_cookies failed".to_string())));
+
+        let opts = RequestOptions {
+            cookies: Some(vec![Cookie {
+                name:   "s".to_string(),
+                value:  "v".to_string(),
+                domain: None,
+                path:   None,
+            }]),
+            headers: None,
+        };
+        let result = fetch_with_ops("https://example.com", 0, Some(&opts), &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_set_extra_headers_error_propagates_before_open() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_set_extra_headers()
+            .returning(|_| Err(HtmlError::BrowserError("set_headers failed".to_string())));
+
+        let opts = RequestOptions {
+            cookies: None,
+            headers: Some({
+                let mut m = HashMap::new();
+                m.insert("Authorization".to_string(), "Bearer tok".to_string());
+                m
+            }),
+        };
+        let result = fetch_with_ops("https://example.com", 0, Some(&opts), &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_apply_request_options_none_calls_nothing() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_set_cookies().never();
+        mock.expect_set_extra_headers().never();
+
+        let result = apply_request_options("https://example.com", None, &mut mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_request_options_only_cookies() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_set_cookies().returning(|_, _| Ok(()));
+        mock.expect_set_extra_headers().never();
+
+        let opts = RequestOptions {
+            cookies: Some(vec![Cookie {
+                name:   "k".to_string(),
+                value:  "v".to_string(),
+                domain: None,
+                path:   None,
+            }]),
+            headers: None,
+        };
+        let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_request_options_only_headers() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_set_cookies().never();
+        mock.expect_set_extra_headers().returning(|_| Ok(()));
+
+        let opts = RequestOptions {
+            cookies: None,
+            headers: Some({
+                let mut m = HashMap::new();
+                m.insert("Accept-Language".to_string(), "fr".to_string());
+                m
+            }),
+        };
+        let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_apply_request_options_both_called_in_order() {
+        let mut mock = MockBrowserOps::new();
+        let mut seq = mockall::Sequence::new();
+        mock.expect_set_cookies()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _| Ok(()));
+        mock.expect_set_extra_headers()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_| Ok(()));
+
+        let opts = RequestOptions {
+            cookies: Some(vec![Cookie {
+                name:   "k".to_string(),
+                value:  "v".to_string(),
+                domain: None,
+                path:   None,
+            }]),
+            headers: Some({
+                let mut m = HashMap::new();
+                m.insert("X-Api-Key".to_string(), "secret".to_string());
+                m
+            }),
+        };
+        let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn extract_host_https() {
+        assert_eq!(extract_host("https://example.com/path?q=1").unwrap(), "example.com");
+    }
+
+    #[test]
+    fn extract_host_http_with_port() {
+        assert_eq!(extract_host("http://example.com:8080/path").unwrap(), "example.com");
+    }
+
+    #[test]
+    fn extract_host_invalid_scheme() {
+        assert!(extract_host("ftp://example.com").is_err());
     }
 }

@@ -1,6 +1,7 @@
 mod error;
 mod form;
 mod html;
+mod request_options;
 mod resource_uri;
 
 pub use error::HtmlError;
@@ -11,4 +12,5 @@ pub use form::{
     FormPreview, FormStep, SelectOption,
 };
 pub use html::HtmlContent;
+pub use request_options::{Cookie, RequestOptions};
 pub use resource_uri::ResourceUri;
