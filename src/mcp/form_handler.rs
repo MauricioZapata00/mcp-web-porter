@@ -1,18 +1,22 @@
-use crate::browser::{BrowserOps, ChromiumBrowser};
+use crate::browser::{apply_request_options, BrowserOps, ChromiumBrowser};
 use crate::operations::{extract_text, resolve_field, validate_inputs};
 use crate::types::{
     ClickButtonResult, FieldInput, FieldPreview, FilledField,
-    FormFillResult, FormPreview, FormStep, HtmlError, ResourceUri,
+    FormFillResult, FormPreview, FormStep, HtmlError, RequestOptions, ResourceUri,
 };
 
 #[derive(Clone, Default)]
 pub struct FormHandler;
 
 impl FormHandler {
-    pub async fn handle_detect(&self, url: &str) -> Result<FormStep, HtmlError> {
+    pub async fn handle_detect(
+        &self,
+        url:     &str,
+        options: Option<RequestOptions>,
+    ) -> Result<FormStep, HtmlError> {
         ResourceUri::parse(url)?;
         let mut driver = ChromiumBrowser::new(false);
-        let result = detect_with_ops(url, &mut driver).await;
+        let result = detect_with_ops(url, options.as_ref(), &mut driver).await;
         driver.cleanup().await;
         result
     }
@@ -22,6 +26,7 @@ impl FormHandler {
         url:       &str,
         button_id: Option<String>,
         label:     Option<String>,
+        options:   Option<RequestOptions>,
     ) -> Result<ClickButtonResult, HtmlError> {
         ResourceUri::parse(url)?;
         let mut driver = ChromiumBrowser::new(false);
@@ -29,6 +34,7 @@ impl FormHandler {
             url,
             button_id.as_deref(),
             label.as_deref(),
+            options.as_ref(),
             &mut driver,
         )
         .await;
@@ -38,11 +44,12 @@ impl FormHandler {
 
     pub async fn handle_fill(
         &self,
-        url: &str,
-        inputs: Vec<FieldInput>,
-        auto_submit: bool,
+        url:                 &str,
+        inputs:              Vec<FieldInput>,
+        auto_submit:         bool,
         submit_button_label: Option<String>,
-        dry_run: bool,
+        dry_run:             bool,
+        options:             Option<RequestOptions>,
     ) -> Result<FormFillResult, HtmlError> {
         ResourceUri::parse(url)?;
         let mut driver = ChromiumBrowser::new(false);
@@ -52,6 +59,7 @@ impl FormHandler {
             auto_submit,
             submit_button_label.as_deref(),
             dry_run,
+            options.as_ref(),
             &mut driver,
         )
         .await;
@@ -61,10 +69,12 @@ impl FormHandler {
 }
 
 pub(crate) async fn detect_with_ops(
-    url: &str,
-    ops: &mut impl BrowserOps,
+    url:     &str,
+    options: Option<&RequestOptions>,
+    ops:     &mut impl BrowserOps,
 ) -> Result<FormStep, HtmlError> {
     ops.start().await?;
+    apply_request_options(url, options, ops).await?;
     ops.open(url).await?;
     ops.read(1500).await?;
     let (fields, buttons) = ops.detect_fields().await?;
@@ -72,14 +82,16 @@ pub(crate) async fn detect_with_ops(
 }
 
 pub(crate) async fn fill_with_ops(
-    url: &str,
-    inputs: Vec<FieldInput>,
-    auto_submit: bool,
+    url:                 &str,
+    inputs:              Vec<FieldInput>,
+    auto_submit:         bool,
     submit_button_label: Option<&str>,
-    dry_run: bool,
-    ops: &mut impl BrowserOps,
+    dry_run:             bool,
+    options:             Option<&RequestOptions>,
+    ops:                 &mut impl BrowserOps,
 ) -> Result<FormFillResult, HtmlError> {
     ops.start().await?;
+    apply_request_options(url, options, ops).await?;
     ops.open(url).await?;
     ops.read(1500).await?;
     let (detected, _) = ops.detect_fields().await?;
@@ -157,12 +169,14 @@ pub(crate) async fn click_button_with_ops(
     url:       &str,
     button_id: Option<&str>,
     label:     Option<&str>,
+    options:   Option<&RequestOptions>,
     ops:       &mut impl BrowserOps,
 ) -> Result<ClickButtonResult, HtmlError> {
     if button_id.is_none() && label.is_none() {
         return Err(HtmlError::ButtonNotFound("button_id and label are both None".into()));
     }
     ops.start().await?;
+    apply_request_options(url, options, ops).await?;
     ops.open(url).await?;
     ops.read(1500).await?;
     let (clicked_button, resolved_by) = ops.click_button_by_id_or_label(
@@ -237,7 +251,7 @@ mod tests {
         mock.expect_detect_fields()
             .returning(|| Err(HtmlError::BrowserError("detect failed".to_string())));
 
-        let result = fill_with_ops("https://example.com", vec![], false, None, false, &mut mock).await;
+        let result = fill_with_ops("https://example.com", vec![], false, None, false, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
@@ -256,7 +270,7 @@ mod tests {
             identifier: "custname".to_string(),
             value: FieldValue::Text("Alice".to_string()),
         }];
-        let result = fill_with_ops("https://example.com", inputs, false, None, false, &mut mock).await;
+        let result = fill_with_ops("https://example.com", inputs, false, None, false, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
@@ -276,7 +290,7 @@ mod tests {
             identifier: "custname".to_string(),
             value: FieldValue::Text("Alice".to_string()),
         }];
-        let result = fill_with_ops("https://example.com", inputs, true, None, false, &mut mock).await;
+        let result = fill_with_ops("https://example.com", inputs, true, None, false, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::SubmitFailed(_))));
     }
 
@@ -302,6 +316,7 @@ mod tests {
             false,
             Some("Continue"),
             false,
+            None,
             &mut mock,
         )
         .await;
@@ -323,8 +338,52 @@ mod tests {
             identifier: "custname".to_string(),
             value: FieldValue::Text("Alice".to_string()),
         }];
-        let result = fill_with_ops("https://example.com", inputs, false, None, true, &mut mock).await;
+        let result = fill_with_ops("https://example.com", inputs, false, None, true, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_detect_set_cookies_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_set_cookies()
+            .returning(|_, _| Err(HtmlError::BrowserError("set_cookies failed".to_string())));
+
+        let opts = RequestOptions {
+            cookies: Some(vec![crate::types::Cookie {
+                name:   "s".to_string(),
+                value:  "v".to_string(),
+                domain: None,
+                path:   None,
+            }]),
+            headers: None,
+        };
+        let result = detect_with_ops("https://example.com", Some(&opts), &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_fill_set_extra_headers_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_set_extra_headers()
+            .returning(|_| Err(HtmlError::BrowserError("headers failed".to_string())));
+
+        use std::collections::HashMap;
+        let mut h = HashMap::new();
+        h.insert("Authorization".to_string(), "Bearer x".to_string());
+        let opts = RequestOptions { cookies: None, headers: Some(h) };
+        let result = fill_with_ops("https://example.com", vec![], false, None, false, Some(&opts), &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_click_button_options_none_no_cookie_calls() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_set_cookies().never();
+        mock.expect_set_extra_headers().never();
+        let result = click_button_with_ops("https://example.com", None, None, None, &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
     }
 
     // ── Mock-based tests for click_button_with_ops ────────────────────────────
@@ -332,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn test_click_button_both_none_returns_error() {
         let mut mock = MockBrowserOps::new();
-        let result = click_button_with_ops("https://example.com", None, None, &mut mock).await;
+        let result = click_button_with_ops("https://example.com", None, None, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
     }
 
@@ -345,7 +404,7 @@ mod tests {
         mock.expect_click_button_by_id_or_label()
             .returning(|_, _| Err(HtmlError::ButtonNotFound("by id 'btn'".to_string())));
 
-        let result = click_button_with_ops("https://example.com", Some("btn"), None, &mut mock).await;
+        let result = click_button_with_ops("https://example.com", Some("btn"), None, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
     }
 
@@ -366,7 +425,7 @@ mod tests {
             .times(1)
             .returning(|_| Err(HtmlError::BrowserError("read failed".to_string())));
 
-        let result = click_button_with_ops("https://example.com", Some("go"), None, &mut mock).await;
+        let result = click_button_with_ops("https://example.com", Some("go"), None, None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
@@ -384,7 +443,7 @@ mod tests {
         mock.expect_detect_fields()
             .returning(|| Err(HtmlError::BrowserError("detect failed".to_string())));
 
-        let result = click_button_with_ops("https://example.com", None, Some("Go"), &mut mock).await;
+        let result = click_button_with_ops("https://example.com", None, Some("Go"), None, &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
@@ -402,7 +461,7 @@ mod tests {
         mock.expect_detect_fields()
             .returning(|| Ok((vec![make_text_field("step2_name")], vec![])));
 
-        let result = click_button_with_ops("https://example.com", Some("next"), None, &mut mock).await;
+        let result = click_button_with_ops("https://example.com", Some("next"), None, None, &mut mock).await;
         assert!(result.is_ok());
         let r = result.unwrap();
         assert!(r.next_step.is_some());
@@ -421,7 +480,7 @@ mod tests {
             )));
         mock.expect_detect_fields().returning(|| Ok((vec![], vec![])));
 
-        let result = click_button_with_ops("https://example.com", None, Some("Submit"), &mut mock).await;
+        let result = click_button_with_ops("https://example.com", None, Some("Submit"), None, &mut mock).await;
         assert!(result.is_ok());
         let r = result.unwrap();
         assert!(r.next_step.is_none());
@@ -433,7 +492,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_detect_returns_fields() {
         let handler = FormHandler::default();
-        let result = handler.handle_detect("https://httpbin.org/forms/post").await;
+        let result = handler.handle_detect("https://httpbin.org/forms/post", None).await;
         assert!(result.is_ok(), "detect failed: {:?}", result);
         let step = result.unwrap();
         assert!(!step.fields.is_empty(), "expected at least one field");
@@ -448,7 +507,7 @@ mod tests {
             value: FieldValue::Text("Alice".to_string()),
         }];
         let result = handler
-            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, false)
+            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, false, None)
             .await;
         assert!(result.is_ok(), "fill failed: {:?}", result);
         let r = result.unwrap();
@@ -465,7 +524,7 @@ mod tests {
             value: FieldValue::Text("Alice".to_string()),
         }];
         let result = handler
-            .handle_fill("https://httpbin.org/forms/post", inputs, true, None, false)
+            .handle_fill("https://httpbin.org/forms/post", inputs, true, None, false, None)
             .await;
         assert!(result.is_ok(), "fill+submit failed: {:?}", result);
         let r = result.unwrap();
@@ -482,7 +541,7 @@ mod tests {
             value: FieldValue::Text("x".to_string()),
         }];
         let result = handler
-            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, false)
+            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, false, None)
             .await;
         assert!(matches!(result, Err(HtmlError::FieldNotFound(_))));
     }
@@ -496,7 +555,7 @@ mod tests {
             value: FieldValue::Text("not-an-email".to_string()),
         }];
         let result = handler
-            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, false)
+            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, false, None)
             .await;
         assert!(matches!(result, Err(HtmlError::InvalidFieldValue { .. })));
     }
@@ -510,7 +569,7 @@ mod tests {
             value: FieldValue::Text("Alice".to_string()),
         }];
         let result = handler
-            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, true)
+            .handle_fill("https://httpbin.org/forms/post", inputs, false, None, true, None)
             .await;
         assert!(result.is_ok(), "dry_run failed: {:?}", result);
         let r = result.unwrap();
@@ -527,6 +586,7 @@ mod tests {
                 "https://httpbin.org/forms/post",
                 None,
                 Some("Submit order".to_string()),
+                None,
             )
             .await;
         assert!(result.is_ok(), "click_button failed: {:?}", result);
@@ -543,6 +603,7 @@ mod tests {
                 "https://httpbin.org/forms/post",
                 None,
                 Some("nonexistent_button_xyz".to_string()),
+                None,
             )
             .await;
         assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
@@ -552,7 +613,7 @@ mod tests {
     async fn test_handle_click_button_both_none() {
         let handler = FormHandler::default();
         let result = handler
-            .handle_click_button("https://httpbin.org/forms/post", None, None)
+            .handle_click_button("https://httpbin.org/forms/post", None, None, None)
             .await;
         assert!(matches!(result, Err(HtmlError::ButtonNotFound(_))));
     }

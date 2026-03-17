@@ -1,13 +1,17 @@
 use crate::browser::fetch_rendered_html;
 use super::parse::extract_text;
-use crate::types::{HtmlContent, HtmlError};
+use crate::types::{HtmlContent, HtmlError, RequestOptions};
 
 pub async fn fetch_html(url: &str) -> Result<HtmlContent, HtmlError> {
-    fetch_html_with_options(url, false).await
+    fetch_html_with_options(url, false, None).await
 }
 
-pub async fn fetch_html_with_options(url: &str, stealth: bool) -> Result<HtmlContent, HtmlError> {
-    let html = fetch_rendered_html(url, 1500, stealth).await?;
+pub async fn fetch_html_with_options(
+    url:     &str,
+    stealth: bool,
+    options: Option<&RequestOptions>,
+) -> Result<HtmlContent, HtmlError> {
+    let html = fetch_rendered_html(url, 1500, stealth, options).await?;
     let text = extract_text(&html);
     Ok(HtmlContent::new(url.to_string(), html, text))
 }
