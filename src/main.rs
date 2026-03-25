@@ -30,18 +30,20 @@ struct CookieParam {
 }
 
 fn into_request_options(
-    cookies: Option<Vec<CookieParam>>,
-    headers: Option<HashMap<String, String>>,
+    cookies:             Option<Vec<CookieParam>>,
+    headers:             Option<HashMap<String, String>>,
+    connect_to_existing: bool,
 ) -> Option<RequestOptions> {
-    match (cookies, headers) {
-        (None, None) => None,
-        (cookies, headers) => Some(RequestOptions {
+    match (cookies.is_none() && headers.is_none() && !connect_to_existing, ()) {
+        (true, _) => None,
+        (false, _) => Some(RequestOptions {
             cookies: cookies.map(|cs| {
                 cs.into_iter()
                     .map(|c| Cookie { name: c.name, value: c.value, domain: c.domain, path: c.path })
                     .collect()
             }),
             headers,
+            connect_to_existing,
         }),
     }
 }
@@ -56,6 +58,8 @@ struct ReadPageParams {
     cookies: Option<Vec<CookieParam>>,
     #[schemars(description = "Extra HTTP headers to send with every request")]
     headers: Option<HashMap<String, String>>,
+    #[schemars(description = "Connect to an existing Chrome running with --remote-debugging-port=9222 instead of launching a new headless instance. Required for pages protected by SSO (Okta, GCP IAP).")]
+    connect_to_existing: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -66,6 +70,8 @@ struct DetectFormParams {
     cookies: Option<Vec<CookieParam>>,
     #[schemars(description = "Extra HTTP headers to send with every request")]
     headers: Option<HashMap<String, String>>,
+    #[schemars(description = "Connect to an existing Chrome running with --remote-debugging-port=9222 instead of launching a new headless instance. Required for pages protected by SSO (Okta, GCP IAP).")]
+    connect_to_existing: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -84,6 +90,8 @@ struct FillFormParams {
     cookies: Option<Vec<CookieParam>>,
     #[schemars(description = "Extra HTTP headers to send with every request")]
     headers: Option<HashMap<String, String>>,
+    #[schemars(description = "Connect to an existing Chrome running with --remote-debugging-port=9222 instead of launching a new headless instance. Required for pages protected by SSO (Okta, GCP IAP).")]
+    connect_to_existing: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -98,6 +106,8 @@ struct ClickButtonParams {
     cookies: Option<Vec<CookieParam>>,
     #[schemars(description = "Extra HTTP headers to send with every request")]
     headers: Option<HashMap<String, String>>,
+    #[schemars(description = "Connect to an existing Chrome running with --remote-debugging-port=9222 instead of launching a new headless instance. Required for pages protected by SSO (Okta, GCP IAP).")]
+    connect_to_existing: Option<bool>,
 }
 
 #[derive(Clone)]
@@ -122,14 +132,14 @@ impl HtmlResourceServer {
                           commercial sites (news portals, paywalls).")]
     async fn read_page(
         &self,
-        Parameters(ReadPageParams { url, stealth, cookies, headers }): Parameters<ReadPageParams>,
+        Parameters(ReadPageParams { url, stealth, cookies, headers, connect_to_existing }): Parameters<ReadPageParams>,
     ) -> Result<CallToolResult, McpError> {
         let stealth = stealth.unwrap_or(false);
         let resource_uri = match ResourceUri::parse(&url) {
             Ok(u) => u,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
-        let options = into_request_options(cookies, headers);
+        let options = into_request_options(cookies, headers, connect_to_existing.unwrap_or(false));
         match fetch_html_with_options(resource_uri.url(), stealth, options.as_ref()).await {
             Ok(content) => Ok(CallToolResult::success(vec![Content::text(content.text())])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
@@ -140,9 +150,9 @@ impl HtmlResourceServer {
                           JavaScript renders.")]
     async fn detect_form(
         &self,
-        Parameters(DetectFormParams { url, cookies, headers }): Parameters<DetectFormParams>,
+        Parameters(DetectFormParams { url, cookies, headers, connect_to_existing }): Parameters<DetectFormParams>,
     ) -> Result<CallToolResult, McpError> {
-        let options = into_request_options(cookies, headers);
+        let options = into_request_options(cookies, headers, connect_to_existing.unwrap_or(false));
         match self.form_handler.handle_detect(&url, options).await {
             Ok(step) => {
                 let text = serde_json::to_string_pretty(&step)
@@ -158,9 +168,9 @@ impl HtmlResourceServer {
                           after clicking, and any new form fields that appear.")]
     async fn click_button(
         &self,
-        Parameters(ClickButtonParams { url, button_id, label, cookies, headers }): Parameters<ClickButtonParams>,
+        Parameters(ClickButtonParams { url, button_id, label, cookies, headers, connect_to_existing }): Parameters<ClickButtonParams>,
     ) -> Result<CallToolResult, McpError> {
-        let options = into_request_options(cookies, headers);
+        let options = into_request_options(cookies, headers, connect_to_existing.unwrap_or(false));
         match self.form_handler.handle_click_button(&url, button_id, label, options).await {
             Ok(result) => {
                 let text = serde_json::to_string_pretty(&result)
@@ -183,9 +193,10 @@ impl HtmlResourceServer {
             dry_run,
             cookies,
             headers,
+            connect_to_existing,
         }): Parameters<FillFormParams>,
     ) -> Result<CallToolResult, McpError> {
-        let options = into_request_options(cookies, headers);
+        let options = into_request_options(cookies, headers, connect_to_existing.unwrap_or(false));
         match self
             .form_handler
             .handle_fill(

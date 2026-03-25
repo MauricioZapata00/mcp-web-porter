@@ -111,21 +111,29 @@ pub(crate) trait BrowserOps {
 // ─── Real implementation ──────────────────────────────────────────────────────
 
 pub(crate) struct ChromiumBrowser {
-    stealth: bool,
-    browser: Option<Browser>,
-    handler_task: Option<tokio::task::JoinHandle<()>>,
-    page: Option<chromiumoxide::Page>,
+    stealth:             bool,
+    connect_to_existing: bool,
+    browser:             Option<Browser>,
+    handler_task:        Option<tokio::task::JoinHandle<()>>,
+    page:                Option<chromiumoxide::Page>,
 }
 
 impl ChromiumBrowser {
-    pub(crate) fn new(stealth: bool) -> Self {
-        Self { stealth, browser: None, handler_task: None, page: None }
+    pub(crate) fn new(stealth: bool, connect_to_existing: bool) -> Self {
+        Self { stealth, connect_to_existing, browser: None, handler_task: None, page: None }
     }
 
     pub(crate) async fn cleanup(&mut self) {
         drop(self.page.take());
-        if let Some(mut browser) = self.browser.take() {
-            browser.close().await.ok();
+        match self.connect_to_existing {
+            true => {
+                self.browser.take();
+            }
+            false => {
+                if let Some(mut browser) = self.browser.take() {
+                    browser.close().await.ok();
+                }
+            }
         }
         if let Some(task) = self.handler_task.take() {
             task.abort();
@@ -165,22 +173,47 @@ fn map_field_type(s: &str) -> FormFieldType {
 
 impl BrowserOps for ChromiumBrowser {
     async fn start(&mut self) -> Result<(), HtmlError> {
-        let unique_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-
-        let config = BrowserConfig::builder()
-            .no_sandbox()
-            .arg("--disable-dev-shm-usage")
-            .arg("--disable-gpu")
-            .arg(format!("--user-data-dir=/tmp/mcp-chrome-{}", unique_id))
-            .build()
-            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-
-        let (browser, mut handler) = Browser::launch(config).await
-            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-
+        let (browser, mut handler) = match self.connect_to_existing {
+            false => {
+                let unique_id = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let config = BrowserConfig::builder()
+                    .no_sandbox()
+                    .arg("--disable-dev-shm-usage")
+                    .arg("--disable-gpu")
+                    .arg(format!("--user-data-dir=/tmp/mcp-chrome-{}", unique_id))
+                    .build()
+                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+                Browser::launch(config).await
+                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?
+            }
+            true => {
+                let version: serde_json::Value =
+                    reqwest::get("http://127.0.0.1:9222/json/version")
+                        .await
+                        .map_err(|e| HtmlError::BrowserError(format!(
+                            "cannot reach Chrome debug port \
+                             (start Chrome with --remote-debugging-port=9222): {}", e
+                        )))?
+                        .json()
+                        .await
+                        .map_err(|e| HtmlError::BrowserError(format!(
+                            "invalid response from Chrome debug port: {}", e
+                        )))?;
+                let ws_url = version["webSocketDebuggerUrl"]
+                    .as_str()
+                    .ok_or_else(|| HtmlError::BrowserError(
+                        "no webSocketDebuggerUrl in Chrome debug response".into()
+                    ))?
+                    .to_owned();
+                Browser::connect(ws_url).await
+                    .map_err(|e| HtmlError::BrowserError(format!(
+                        "failed to connect to existing Chrome: {}", e
+                    )))?
+            }
+        };
         self.handler_task = Some(tokio::spawn(async move {
             while handler.next().await.is_some() {}
         }));
@@ -380,50 +413,6 @@ impl BrowserOps for ChromiumBrowser {
         Ok(())
     }
 
-    async fn set_cookies(&mut self, url: &str, cookies: &[Cookie]) -> Result<(), HtmlError> {
-        if cookies.is_empty() {
-            return Ok(());
-        }
-        let page = self.page.as_ref()
-            .ok_or_else(|| HtmlError::BrowserError("page not open".into()))?;
-        for cookie in cookies {
-            let domain = match &cookie.domain {
-                Some(d) => d.clone(),
-                None    => extract_host(url)?,
-            };
-            let path = cookie.path.clone().unwrap_or_else(|| "/".to_string());
-            let cdp_cookie = CdpCookieParam::builder()
-                .name(cookie.name.clone())
-                .value(cookie.value.clone())
-                .domain(domain)
-                .path(path)
-                .build()
-                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-            page.set_cookie(cdp_cookie).await
-                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-        }
-        Ok(())
-    }
-
-    async fn set_extra_headers(&mut self, headers: &HashMap<String, String>) -> Result<(), HtmlError> {
-        if headers.is_empty() {
-            return Ok(());
-        }
-        let page = self.page.as_ref()
-            .ok_or_else(|| HtmlError::BrowserError("page not open".into()))?;
-        use chromiumoxide::cdp::browser_protocol::network::{
-            Headers as CdpHeaders, SetExtraHttpHeadersParams,
-        };
-        let json_obj: serde_json::Map<String, serde_json::Value> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-        page.execute(SetExtraHttpHeadersParams { headers: CdpHeaders::new(serde_json::Value::Object(json_obj)) })
-            .await
-            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-        Ok(())
-    }
-
     async fn click_button_by_id_or_label(
         &mut self,
         button_id: Option<String>,
@@ -502,6 +491,50 @@ impl BrowserOps for ChromiumBrowser {
 
         Err(HtmlError::ButtonNotFound("button_id and label are both None".into()))
     }
+
+    async fn set_cookies(&mut self, url: &str, cookies: &[Cookie]) -> Result<(), HtmlError> {
+        if cookies.is_empty() {
+            return Ok(());
+        }
+        let page = self.page.as_ref()
+            .ok_or_else(|| HtmlError::BrowserError("page not open".into()))?;
+        for cookie in cookies {
+            let domain = match &cookie.domain {
+                Some(d) => d.clone(),
+                None    => extract_host(url)?,
+            };
+            let path = cookie.path.clone().unwrap_or_else(|| "/".to_string());
+            let cdp_cookie = CdpCookieParam::builder()
+                .name(cookie.name.clone())
+                .value(cookie.value.clone())
+                .domain(domain)
+                .path(path)
+                .build()
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            page.set_cookie(cdp_cookie).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn set_extra_headers(&mut self, headers: &HashMap<String, String>) -> Result<(), HtmlError> {
+        if headers.is_empty() {
+            return Ok(());
+        }
+        let page = self.page.as_ref()
+            .ok_or_else(|| HtmlError::BrowserError("page not open".into()))?;
+        use chromiumoxide::cdp::browser_protocol::network::{
+            Headers as CdpHeaders, SetExtraHttpHeadersParams,
+        };
+        let json_obj: serde_json::Map<String, serde_json::Value> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        page.execute(SetExtraHttpHeadersParams { headers: CdpHeaders::new(serde_json::Value::Object(json_obj)) })
+            .await
+            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        Ok(())
+    }
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -548,7 +581,8 @@ pub async fn fetch_rendered_html(
     stealth: bool,
     options: Option<&RequestOptions>,
 ) -> Result<String, HtmlError> {
-    let mut driver = ChromiumBrowser::new(stealth);
+    let connect_to_existing = options.map(|o| o.connect_to_existing).unwrap_or(false);
+    let mut driver = ChromiumBrowser::new(stealth, connect_to_existing);
     let result = fetch_with_ops(url, wait_ms, options, &mut driver).await;
     driver.cleanup().await;
     result
@@ -800,7 +834,8 @@ mod tests {
                 domain: None,
                 path:   None,
             }]),
-            headers: None,
+            headers:             None,
+            connect_to_existing: false,
         };
         let result = fetch_with_ops("https://example.com", 0, Some(&opts), &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
@@ -814,12 +849,13 @@ mod tests {
             .returning(|_| Err(HtmlError::BrowserError("set_headers failed".to_string())));
 
         let opts = RequestOptions {
-            cookies: None,
+            cookies:             None,
             headers: Some({
                 let mut m = HashMap::new();
                 m.insert("Authorization".to_string(), "Bearer tok".to_string());
                 m
             }),
+            connect_to_existing: false,
         };
         let result = fetch_with_ops("https://example.com", 0, Some(&opts), &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
@@ -848,7 +884,8 @@ mod tests {
                 domain: None,
                 path:   None,
             }]),
-            headers: None,
+            headers:             None,
+            connect_to_existing: false,
         };
         let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
         assert!(result.is_ok());
@@ -861,12 +898,13 @@ mod tests {
         mock.expect_set_extra_headers().returning(|_| Ok(()));
 
         let opts = RequestOptions {
-            cookies: None,
+            cookies:             None,
             headers: Some({
                 let mut m = HashMap::new();
                 m.insert("Accept-Language".to_string(), "fr".to_string());
                 m
             }),
+            connect_to_existing: false,
         };
         let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
         assert!(result.is_ok());
@@ -897,9 +935,27 @@ mod tests {
                 m.insert("X-Api-Key".to_string(), "secret".to_string());
                 m
             }),
+            connect_to_existing: false,
         };
         let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_connect_to_existing_true_start_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start()
+            .returning(|| Err(HtmlError::BrowserError(
+                "cannot reach Chrome debug port (start Chrome with --remote-debugging-port=9222): connection refused".to_string()
+            )));
+
+        let opts = RequestOptions {
+            cookies:             None,
+            headers:             None,
+            connect_to_existing: true,
+        };
+        let result = fetch_with_ops("https://example.com", 0, Some(&opts), &mut mock).await;
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
     #[test]

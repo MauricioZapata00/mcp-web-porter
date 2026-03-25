@@ -10,8 +10,9 @@ pub struct Cookie {
 
 #[derive(Debug, Clone, Default)]
 pub struct RequestOptions {
-    pub cookies: Option<Vec<Cookie>>,
-    pub headers: Option<HashMap<String, String>>,
+    pub cookies:             Option<Vec<Cookie>>,
+    pub headers:             Option<HashMap<String, String>>,
+    pub connect_to_existing: bool,
 }
 
 #[cfg(test)]
@@ -49,5 +50,16 @@ mod tests {
         let opts = RequestOptions::default();
         assert!(opts.cookies.is_none());
         assert!(opts.headers.is_none());
+        assert!(!opts.connect_to_existing);
+    }
+
+    #[test]
+    fn request_options_connect_to_existing_true_constructs() {
+        let opts = RequestOptions {
+            cookies:             None,
+            headers:             None,
+            connect_to_existing: true,
+        };
+        assert!(opts.connect_to_existing);
     }
 }

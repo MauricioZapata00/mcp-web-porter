@@ -15,7 +15,8 @@ impl FormHandler {
         options: Option<RequestOptions>,
     ) -> Result<FormStep, HtmlError> {
         ResourceUri::parse(url)?;
-        let mut driver = ChromiumBrowser::new(false);
+        let connect_to_existing = options.as_ref().map(|o| o.connect_to_existing).unwrap_or(false);
+        let mut driver = ChromiumBrowser::new(false, connect_to_existing);
         let result = detect_with_ops(url, options.as_ref(), &mut driver).await;
         driver.cleanup().await;
         result
@@ -29,7 +30,8 @@ impl FormHandler {
         options:   Option<RequestOptions>,
     ) -> Result<ClickButtonResult, HtmlError> {
         ResourceUri::parse(url)?;
-        let mut driver = ChromiumBrowser::new(false);
+        let connect_to_existing = options.as_ref().map(|o| o.connect_to_existing).unwrap_or(false);
+        let mut driver = ChromiumBrowser::new(false, connect_to_existing);
         let result = click_button_with_ops(
             url,
             button_id.as_deref(),
@@ -52,7 +54,8 @@ impl FormHandler {
         options:             Option<RequestOptions>,
     ) -> Result<FormFillResult, HtmlError> {
         ResourceUri::parse(url)?;
-        let mut driver = ChromiumBrowser::new(false);
+        let connect_to_existing = options.as_ref().map(|o| o.connect_to_existing).unwrap_or(false);
+        let mut driver = ChromiumBrowser::new(false, connect_to_existing);
         let result = fill_with_ops(
             url,
             inputs,
@@ -356,7 +359,8 @@ mod tests {
                 domain: None,
                 path:   None,
             }]),
-            headers: None,
+            headers:             None,
+            connect_to_existing: false,
         };
         let result = detect_with_ops("https://example.com", Some(&opts), &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
@@ -372,7 +376,7 @@ mod tests {
         use std::collections::HashMap;
         let mut h = HashMap::new();
         h.insert("Authorization".to_string(), "Bearer x".to_string());
-        let opts = RequestOptions { cookies: None, headers: Some(h) };
+        let opts = RequestOptions { cookies: None, headers: Some(h), connect_to_existing: false };
         let result = fill_with_ops("https://example.com", vec![], false, None, false, Some(&opts), &mut mock).await;
         assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }

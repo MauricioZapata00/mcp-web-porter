@@ -187,6 +187,57 @@ services:
       - MAX_SESSIONS=100
 ```
 
+## Connecting to an Existing Chrome Instance
+
+By default every tool call launches a fresh headless Chrome instance. Set
+`connect_to_existing: true` on any tool call to connect to a Chrome browser
+that is already running on your machine instead. This inherits the user's full
+authenticated session, which is required for pages protected by corporate SSO
+(Okta, GCP IAP, etc.).
+
+### Start Chrome with remote debugging enabled
+
+**Linux**
+```bash
+google-chrome --remote-debugging-port=9222 --no-first-run
+# or for Chromium
+chromium-browser --remote-debugging-port=9222 --no-first-run
+```
+
+**macOS**
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 --no-first-run
+```
+
+To launch Chrome this way every time you click its icon on macOS, create an
+Automator Application with a **Run Shell Script** action containing the command
+above, save it to `/Applications/Chrome (MCP).app`, and add it to the Dock in
+place of the regular Chrome icon.
+
+### Verify the debug port is active
+
+Open a browser tab and navigate to:
+```
+http://127.0.0.1:9222/json
+```
+If you see a JSON list of your open tabs, Chrome is ready to accept connections.
+
+### Use in a tool call
+
+```json
+{
+  "url": "https://internal.company.com/dashboard",
+  "connect_to_existing": true
+}
+```
+
+Chrome must remain open for the duration of the tool call. When
+`connect_to_existing` is omitted or `false`, a fresh isolated headless Chrome
+is launched as usual.
+
+---
+
 ## Development
 
 ### Running Tests
