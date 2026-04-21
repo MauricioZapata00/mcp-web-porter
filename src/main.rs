@@ -1,6 +1,6 @@
 use mcp_web_porter::mcp::FormHandler;
 use mcp_web_porter::HtmlResourceHandler as HtmlFetcher;
-use mcp_web_porter::operations::fetch_html_with_options;
+use mcp_web_porter::operations::{fetch_html_with_options, fetch_html_with_images_options};
 use mcp_web_porter::types::{Cookie, FieldInput, RequestOptions, ResourceUri};
 use std::collections::HashMap;
 use rmcp::{
@@ -52,6 +52,8 @@ struct ReadPageParams {
     url: String,
     #[schemars(description = "Enable stealth mode to bypass bot detection (e.g. news sites)")]
     stealth: Option<bool>,
+    #[schemars(description = "Include images from the page as image content items alongside the text (default: true)")]
+    include_images: Option<bool>,
     #[schemars(description = "Cookies to set before navigation")]
     cookies: Option<Vec<CookieParam>>,
     #[schemars(description = "Extra HTTP headers to send with every request")]
@@ -118,21 +120,36 @@ impl HtmlResourceServer {
     }
 
     #[tool(description = "Fetch a webpage and return its readable text content with JavaScript \
-                          fully rendered. Set stealth=true to bypass bot detection on heavy \
-                          commercial sites (news portals, paywalls).")]
+                          fully rendered. Images embedded in the page are returned as image \
+                          content items alongside the text (set include_images=false to skip). \
+                          Set stealth=true to bypass bot detection on heavy commercial sites.")]
     async fn read_page(
         &self,
-        Parameters(ReadPageParams { url, stealth, cookies, headers }): Parameters<ReadPageParams>,
+        Parameters(ReadPageParams { url, stealth, include_images, cookies, headers }): Parameters<ReadPageParams>,
     ) -> Result<CallToolResult, McpError> {
         let stealth = stealth.unwrap_or(false);
+        let include_images = include_images.unwrap_or(true);
         let resource_uri = match ResourceUri::parse(&url) {
             Ok(u) => u,
             Err(e) => return Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         };
         let options = into_request_options(cookies, headers);
-        match fetch_html_with_options(resource_uri.url(), stealth, options.as_ref()).await {
-            Ok(content) => Ok(CallToolResult::success(vec![Content::text(content.text())])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        if include_images {
+            match fetch_html_with_images_options(resource_uri.url(), stealth, options.as_ref()).await {
+                Ok((content, images)) => {
+                    let mut items = vec![Content::text(content.text())];
+                    for img in images {
+                        items.push(Content::image(img.data().to_string(), img.mime_type().to_string()));
+                    }
+                    Ok(CallToolResult::success(items))
+                }
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            }
+        } else {
+            match fetch_html_with_options(resource_uri.url(), stealth, options.as_ref()).await {
+                Ok(content) => Ok(CallToolResult::success(vec![Content::text(content.text())])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+            }
         }
     }
 

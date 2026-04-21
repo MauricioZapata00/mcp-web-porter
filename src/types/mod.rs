@@ -11,6 +11,6 @@ pub use form::{
     FormButton, FormField, FormFieldType, FormFillResult,
     FormPreview, FormStep, SelectOption,
 };
-pub use html::HtmlContent;
+pub use html::{HtmlContent, PageImage};
 pub use request_options::{Cookie, RequestOptions};
 pub use resource_uri::ResourceUri;
