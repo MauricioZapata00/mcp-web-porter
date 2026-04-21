@@ -1,6 +1,23 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PageImage {
+    pub url:       String,
+    pub data:      String,
+    pub mime_type: String,
+}
+
+impl PageImage {
+    pub fn new(url: String, data: String, mime_type: String) -> Self {
+        Self { url, data, mime_type }
+    }
+
+    pub fn url(&self) -> &str { &self.url }
+    pub fn data(&self) -> &str { &self.data }
+    pub fn mime_type(&self) -> &str { &self.mime_type }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HtmlContent {
     pub url: String,
     pub html: String,
@@ -32,6 +49,18 @@ impl HtmlContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_page_image_creation() {
+        let img = PageImage::new(
+            "https://example.com/img.png".to_string(),
+            "abc123".to_string(),
+            "image/png".to_string(),
+        );
+        assert_eq!(img.url(), "https://example.com/img.png");
+        assert_eq!(img.data(), "abc123");
+        assert_eq!(img.mime_type(), "image/png");
+    }
 
     #[test]
     fn test_html_content_creation() {

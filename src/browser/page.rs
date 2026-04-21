@@ -65,6 +65,14 @@ const DETECT_JS: &str = r#"(() => {
   return JSON.stringify({fields, buttons});
 })()"#;
 
+const GET_IMAGES_JS: &str = r#"(() => {
+  return JSON.stringify(
+    Array.from(document.querySelectorAll('img'))
+      .map(img => img.src)
+      .filter(src => src && src.length > 0)
+  );
+})()"#;
+
 /// Abstracts the three browser operations that can independently fail,
 /// enabling mock injection to cover each error path in tests.
 #[cfg_attr(test, mockall::automock)]
@@ -100,6 +108,9 @@ pub(crate) trait BrowserOps {
         button_id: Option<String>,
         label:     Option<String>,
     ) -> Result<(FormButton, ButtonResolvedBy), HtmlError>;
+
+    /// Extract the absolute src URL of every <img> element on the current page.
+    async fn get_image_urls(&mut self) -> Result<Vec<String>, HtmlError>;
 
     /// Set cookies on the current page via CDP before navigation.
     async fn set_cookies(&mut self, url: &str, cookies: &[Cookie]) -> Result<(), HtmlError>;
@@ -380,6 +391,18 @@ impl BrowserOps for ChromiumBrowser {
         Ok(())
     }
 
+    async fn get_image_urls(&mut self) -> Result<Vec<String>, HtmlError> {
+        let page = self.page.as_ref()
+            .ok_or_else(|| HtmlError::BrowserError("page not opened".into()))?;
+        let result = page.evaluate(GET_IMAGES_JS).await
+            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        let json = result.value()
+            .and_then(|v| v.as_str().map(|s| s.to_owned()))
+            .unwrap_or_else(|| "[]".to_string());
+        let urls: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+        Ok(urls)
+    }
+
     async fn set_cookies(&mut self, url: &str, cookies: &[Cookie]) -> Result<(), HtmlError> {
         if cookies.is_empty() {
             return Ok(());
@@ -565,6 +588,33 @@ pub(crate) async fn fetch_with_ops(
     apply_request_options(url, options, ops).await?;
     ops.open(url).await?;
     ops.read(wait_ms).await
+}
+
+pub async fn fetch_rendered_html_with_images(
+    url:     &str,
+    wait_ms: u64,
+    stealth: bool,
+    options: Option<&RequestOptions>,
+) -> Result<(String, Vec<String>), HtmlError> {
+    let mut driver = ChromiumBrowser::new(stealth);
+    let result = fetch_with_images_ops(url, wait_ms, options, &mut driver).await;
+    driver.cleanup().await;
+    result
+}
+
+/// Testable core: start → apply_request_options → open → read → get_image_urls.
+pub(crate) async fn fetch_with_images_ops(
+    url:     &str,
+    wait_ms: u64,
+    options: Option<&RequestOptions>,
+    ops:     &mut impl BrowserOps,
+) -> Result<(String, Vec<String>), HtmlError> {
+    ops.start().await?;
+    apply_request_options(url, options, ops).await?;
+    ops.open(url).await?;
+    let html = ops.read(wait_ms).await?;
+    let image_urls = ops.get_image_urls().await?;
+    Ok((html, image_urls))
 }
 
 /// Testable core: start → open → read → detect_fields.
@@ -900,6 +950,76 @@ mod tests {
         };
         let result = apply_request_options("https://example.com", Some(&opts), &mut mock).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_image_urls_error_propagates() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_get_image_urls()
+            .returning(|| Err(HtmlError::BrowserError("evaluate failed".to_string())));
+
+        let result = mock.get_image_urls().await;
+
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_with_images_ops_success() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html><img src='https://example.com/a.png'/></html>".to_string()));
+        mock.expect_get_image_urls()
+            .returning(|| Ok(vec!["https://example.com/a.png".to_string()]));
+
+        let result = fetch_with_images_ops("https://example.com", 0, None, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (html, urls) = result.unwrap();
+        assert!(html.contains("<img"));
+        assert_eq!(urls, vec!["https://example.com/a.png"]);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_with_images_ops_no_images() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html><p>No images here.</p></html>".to_string()));
+        mock.expect_get_image_urls().returning(|| Ok(vec![]));
+
+        let result = fetch_with_images_ops("https://example.com", 0, None, &mut mock).await;
+
+        assert!(result.is_ok());
+        let (_, urls) = result.unwrap();
+        assert!(urls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_with_images_ops_get_image_urls_error() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read().returning(|_| Ok("<html/>".to_string()));
+        mock.expect_get_image_urls()
+            .returning(|| Err(HtmlError::BrowserError("evaluate failed".to_string())));
+
+        let result = fetch_with_images_ops("https://example.com", 0, None, &mut mock).await;
+
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_with_images_ops_read_error() {
+        let mut mock = MockBrowserOps::new();
+        mock.expect_start().returning(|| Ok(()));
+        mock.expect_open().returning(|_| Ok(()));
+        mock.expect_read()
+            .returning(|_| Err(HtmlError::BrowserError("content failed".to_string())));
+
+        let result = fetch_with_images_ops("https://example.com", 0, None, &mut mock).await;
+
+        assert!(matches!(result, Err(HtmlError::BrowserError(_))));
     }
 
     #[test]
