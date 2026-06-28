@@ -142,6 +142,10 @@ impl ChromiumBrowser {
             task.abort();
         }
     }
+
+    pub(crate) fn page(&self) -> Option<&chromiumoxide::Page> {
+        self.page.as_ref()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -229,90 +233,13 @@ impl BrowserOps for ChromiumBrowser {
     async fn detect_fields(&mut self) -> Result<(Vec<FormField>, Vec<FormButton>), HtmlError> {
         let page = self.page.as_ref()
             .ok_or_else(|| HtmlError::BrowserError("page not opened".into()))?;
-        let response = page.evaluate(DETECT_JS).await
-            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-        let json = response.value()
-            .and_then(|v| v.as_str().map(|s| s.to_owned()))
-            .ok_or_else(|| HtmlError::BrowserError("detect JS returned no string".into()))?;
-        let payload: DetectPayload = serde_json::from_str(&json)
-            .map_err(|e| HtmlError::BrowserError(format!("parse detect result: {}", e)))?;
-        let fields = payload.fields.into_iter().map(|r| FormField {
-            selector:    r.selector,
-            field_type:  map_field_type(&r.field_type),
-            name:        r.name,
-            id:          r.id,
-            label:       r.label,
-            placeholder: r.placeholder,
-            required:    r.required,
-            options:     r.options,
-        }).collect();
-        Ok((fields, payload.buttons))
+        detect_form_on_page(page).await
     }
 
     async fn fill_field(&mut self, selector: &str, value: &FieldValue) -> Result<(), HtmlError> {
         let page = self.page.as_ref()
             .ok_or_else(|| HtmlError::BrowserError("page not opened".into()))?;
-
-        match value {
-            FieldValue::Text(s) => {
-                let sel_json = serde_json::to_string(selector).unwrap_or_default();
-                let clear_js = format!(
-                    "(function(sel) {{ var el = document.querySelector(sel); \
-                     if (!el) return false; \
-                     el.value = ''; \
-                     el.dispatchEvent(new Event('input', {{bubbles:true}})); \
-                     return true; }})({sel_json})"
-                );
-                page.evaluate(clear_js).await
-                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-                let element = page.find_element(selector).await
-                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-                element.type_str(s).await
-                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-            }
-            FieldValue::Selected(opt) => {
-                let sel_json = serde_json::to_string(selector).unwrap_or_default();
-                let opt_json = serde_json::to_string(opt).unwrap_or_default();
-                let js = format!(
-                    "(function(sel, opt) {{ \
-                       var el = document.querySelector(sel); \
-                       if (!el) return false; \
-                       var found = Array.from(el.options).find(function(o) {{ \
-                         return o.value.toLowerCase() === opt.toLowerCase() \
-                             || o.text.trim().toLowerCase() === opt.toLowerCase(); \
-                       }}); \
-                       if (!found) return false; \
-                       el.value = found.value; \
-                       el.dispatchEvent(new Event('change', {{bubbles:true}})); \
-                       return true; \
-                     }})({sel_json}, {opt_json})"
-                );
-                let result = page.evaluate(js).await
-                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-                let ok = result.value()
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !ok {
-                    return Err(HtmlError::SubmitFailed(
-                        format!("could not select option '{}' in '{}'", opt, selector)
-                    ));
-                }
-            }
-            FieldValue::Checked(b) => {
-                let sel_json = serde_json::to_string(selector).unwrap_or_default();
-                let target = if *b { "true" } else { "false" };
-                let js = format!(
-                    "(function(sel, target) {{ \
-                       var el = document.querySelector(sel); \
-                       if (!el) return; \
-                       if (el.checked !== target) el.click(); \
-                     }})({sel_json}, {target})"
-                );
-                page.evaluate(js).await
-                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-            }
-        }
-        Ok(())
+        fill_field_on_page(page, selector, value).await
     }
 
     async fn read_field_value(&mut self, selector: &str) -> Result<Option<String>, HtmlError> {
@@ -454,77 +381,194 @@ impl BrowserOps for ChromiumBrowser {
     ) -> Result<(FormButton, ButtonResolvedBy), HtmlError> {
         let page = self.page.as_ref()
             .ok_or_else(|| HtmlError::BrowserError("page not opened".into()))?;
-
-        if let Some(id) = button_id.as_deref() {
-            let id_json = serde_json::to_string(id).unwrap_or_default();
-            let js = format!(
-                "(function(id) {{ \
-                   var el = document.getElementById(id); \
-                   if (!el) return null; \
-                   var tag = el.tagName.toLowerCase(); \
-                   var tp = (el.type || '').toLowerCase(); \
-                   var clickable = tag === 'button' || tag === 'a' \
-                     || (tag === 'input' && (tp === 'submit' || tp === 'button')); \
-                   if (!clickable) return null; \
-                   el.click(); \
-                   return el.textContent.trim().replace(/\\s+/g,' ') || id; \
-                 }})({id_json})"
-            );
-            let result = page.evaluate(js).await
-                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-            match result.value().and_then(|v| v.as_str().map(|s| s.to_owned())) {
-                Some(text) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    return Ok((
-                        FormButton { label: text, selector: format!("#{}", id) },
-                        ButtonResolvedBy::Id,
-                    ));
-                }
-                None if label.is_none() => {
-                    return Err(HtmlError::ButtonNotFound(format!("by id '{}'", id)));
-                }
-                None => {}
-            }
-        }
-
-        if let Some(lbl) = label {
-            let lbl_json = serde_json::to_string(&lbl).unwrap_or_default();
-            let js = format!(
-                "(function(lbl) {{ \
-                   var els = Array.from(document.querySelectorAll(\
-                     'button,input[type=\"submit\"],input[type=\"button\"],a[href]')); \
-                   var found = els.find(function(el) {{ \
-                     return el.textContent.toLowerCase().includes(lbl.toLowerCase()); \
-                   }}); \
-                   if (!found) return null; \
-                   var text = found.textContent.trim().replace(/\\s+/g,' '); \
-                   var sel = found.id ? '#' + CSS.escape(found.id) \
-                     : found.tagName.toLowerCase(); \
-                   found.click(); \
-                   return JSON.stringify({{ label: text, selector: sel }}); \
-                 }})({lbl_json})"
-            );
-            let result = page.evaluate(js).await
-                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-            match result.value().and_then(|v| v.as_str().map(|s| s.to_owned())) {
-                Some(json) => {
-                    let btn: FormButton = serde_json::from_str(&json)
-                        .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-                    return Ok((btn, ButtonResolvedBy::Label));
-                }
-                None => {
-                    let msg = match button_id {
-                        Some(id) => format!("by id '{}' or label '{}'", id, lbl),
-                        None     => format!("by label '{}'", lbl),
-                    };
-                    return Err(HtmlError::ButtonNotFound(msg));
-                }
-            }
-        }
-
-        Err(HtmlError::ButtonNotFound("button_id and label are both None".into()))
+        click_button_by_id_or_label_on_page(page, button_id.as_deref(), label.as_deref()).await
     }
+}
+
+// ─── Page-direct helpers (shared with operations::act) ─────────────────────────
+
+pub(crate) async fn detect_form_on_page(
+    page: &chromiumoxide::Page,
+) -> Result<(Vec<FormField>, Vec<FormButton>), HtmlError> {
+    let response = page.evaluate(DETECT_JS).await
+        .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+    let json = response.value()
+        .and_then(|v| v.as_str().map(|s| s.to_owned()))
+        .ok_or_else(|| HtmlError::BrowserError("detect JS returned no string".into()))?;
+    let payload: DetectPayload = serde_json::from_str(&json)
+        .map_err(|e| HtmlError::BrowserError(format!("parse detect result: {}", e)))?;
+    let fields = payload.fields.into_iter().map(|r| FormField {
+        selector:    r.selector,
+        field_type:  map_field_type(&r.field_type),
+        name:        r.name,
+        id:          r.id,
+        label:       r.label,
+        placeholder: r.placeholder,
+        required:    r.required,
+        options:     r.options,
+    }).collect();
+    Ok((fields, payload.buttons))
+}
+
+pub(crate) async fn fill_field_on_page(
+    page:     &chromiumoxide::Page,
+    selector: &str,
+    value:    &FieldValue,
+) -> Result<(), HtmlError> {
+    match value {
+        FieldValue::Text(s) => {
+            let sel_json = serde_json::to_string(selector).unwrap_or_default();
+            let clear_js = format!(
+                "(function(sel) {{ var el = document.querySelector(sel); \
+                 if (!el) return false; \
+                 el.value = ''; \
+                 el.dispatchEvent(new Event('input', {{bubbles:true}})); \
+                 return true; }})({sel_json})"
+            );
+            page.evaluate(clear_js).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            let element = page.find_element(selector).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            element.type_str(s).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        }
+        FieldValue::Selected(opt) => {
+            let sel_json = serde_json::to_string(selector).unwrap_or_default();
+            let opt_json = serde_json::to_string(opt).unwrap_or_default();
+            let js = format!(
+                "(function(sel, opt) {{ \
+                   var el = document.querySelector(sel); \
+                   if (!el) return false; \
+                   var found = Array.from(el.options).find(function(o) {{ \
+                     return o.value.toLowerCase() === opt.toLowerCase() \
+                         || o.text.trim().toLowerCase() === opt.toLowerCase(); \
+                   }}); \
+                   if (!found) return false; \
+                   el.value = found.value; \
+                   el.dispatchEvent(new Event('change', {{bubbles:true}})); \
+                   return true; \
+                 }})({sel_json}, {opt_json})"
+            );
+            let result = page.evaluate(js).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+            let ok = result.value()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !ok {
+                return Err(HtmlError::SubmitFailed(
+                    format!("could not select option '{}' in '{}'", opt, selector)
+                ));
+            }
+        }
+        FieldValue::Checked(b) => {
+            let sel_json = serde_json::to_string(selector).unwrap_or_default();
+            let target = if *b { "true" } else { "false" };
+            let js = format!(
+                "(function(sel, target) {{ \
+                   var el = document.querySelector(sel); \
+                   if (!el) return; \
+                   if (el.checked !== target) el.click(); \
+                 }})({sel_json}, {target})"
+            );
+            page.evaluate(js).await
+                .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn click_button_by_id_or_label_on_page(
+    page:      &chromiumoxide::Page,
+    button_id: Option<&str>,
+    label:     Option<&str>,
+) -> Result<(FormButton, ButtonResolvedBy), HtmlError> {
+    if let Some(id) = button_id {
+        let id_json = serde_json::to_string(id).unwrap_or_default();
+        let js = format!(
+            "(function(id) {{ \
+               var el = document.getElementById(id); \
+               if (!el) return null; \
+               var tag = el.tagName.toLowerCase(); \
+               var tp = (el.type || '').toLowerCase(); \
+               var clickable = tag === 'button' || tag === 'a' \
+                 || (tag === 'input' && (tp === 'submit' || tp === 'button')); \
+               if (!clickable) return null; \
+               el.click(); \
+               return el.textContent.trim().replace(/\\s+/g,' ') || id; \
+             }})({id_json})"
+        );
+        let result = page.evaluate(js).await
+            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        match result.value().and_then(|v| v.as_str().map(|s| s.to_owned())) {
+            Some(text) => {
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                return Ok((
+                    FormButton { label: text, selector: format!("#{}", id) },
+                    ButtonResolvedBy::Id,
+                ));
+            }
+            None if label.is_none() => {
+                return Err(HtmlError::ButtonNotFound(format!("by id '{}'", id)));
+            }
+            None => {}
+        }
+    }
+
+    if let Some(lbl) = label {
+        let lbl_json = serde_json::to_string(lbl).unwrap_or_default();
+        let js = format!(
+            "(function(lbl) {{ \
+               var els = Array.from(document.querySelectorAll(\
+                 'button,input[type=\"submit\"],input[type=\"button\"],a[href]')); \
+               var found = els.find(function(el) {{ \
+                 return el.textContent.toLowerCase().includes(lbl.toLowerCase()); \
+               }}); \
+               if (!found) return null; \
+               var text = found.textContent.trim().replace(/\\s+/g,' '); \
+               var sel = found.id ? '#' + CSS.escape(found.id) \
+                 : found.tagName.toLowerCase(); \
+               found.click(); \
+               return JSON.stringify({{ label: text, selector: sel }}); \
+             }})({lbl_json})"
+        );
+        let result = page.evaluate(js).await
+            .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+        match result.value().and_then(|v| v.as_str().map(|s| s.to_owned())) {
+            Some(json) => {
+                let btn: FormButton = serde_json::from_str(&json)
+                    .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                return Ok((btn, ButtonResolvedBy::Label));
+            }
+            None => {
+                let msg = match button_id {
+                    Some(id) => format!("by id '{}' or label '{}'", id, lbl),
+                    None     => format!("by label '{}'", lbl),
+                };
+                return Err(HtmlError::ButtonNotFound(msg));
+            }
+        }
+    }
+
+    Err(HtmlError::ButtonNotFound("button_id and label are both None".into()))
+}
+
+/// Returns true when the selector matches an element in the DOM that is not
+/// `disabled`. Used by the act-handler retry loop to wait out progressive
+/// disclosure (e.g. a State field that only enables after Country is set).
+pub(crate) async fn field_ready_on_page(
+    page:     &chromiumoxide::Page,
+    selector: &str,
+) -> bool {
+    let sel_json = serde_json::to_string(selector).unwrap_or_default();
+    let js = format!(
+        "(function(s) {{ var el = document.querySelector(s); \
+           return !!el && !el.disabled; }})({sel_json})"
+    );
+    page.evaluate(js).await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_bool()))
+        .unwrap_or(false)
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

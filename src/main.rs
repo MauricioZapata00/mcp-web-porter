@@ -1,7 +1,7 @@
-use mcp_web_porter::mcp::{FormHandler, SessionHandler};
+use mcp_web_porter::mcp::{ActHandler, FormHandler, SessionHandler};
 use mcp_web_porter::HtmlResourceHandler as HtmlFetcher;
 use mcp_web_porter::operations::{fetch_html_with_options, fetch_html_with_images_options};
-use mcp_web_porter::types::{Cookie, FieldInput, RequestOptions, ResourceUri};
+use mcp_web_porter::types::{Cookie, FieldInput, PageAction, RequestOptions, ResourceUri};
 use std::collections::HashMap;
 use base64::Engine;
 use rmcp::{
@@ -117,11 +117,44 @@ struct ReadPageWithSessionParams {
     headers: Option<HashMap<String, String>>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ActParams {
+    #[schemars(description = "The URL to load (http:// or https://)")]
+    url: String,
+    #[schemars(description = "Page interactions to dispatch concurrently (Fill / Select / Check / Click)")]
+    actions: Vec<PageAction>,
+    #[schemars(description = "Maximum number of actions allowed in one call (default: 20)")]
+    max_actions: Option<usize>,
+    #[schemars(description = "Per-action retry timeout in ms for fields that may appear/enable later (default: 2000, max: 30000)")]
+    field_timeout_ms: Option<u64>,
+    #[schemars(description = "Cookies to set before navigation")]
+    cookies: Option<Vec<CookieParam>>,
+    #[schemars(description = "Extra HTTP headers to send with every request")]
+    headers: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ActWithSessionParams {
+    #[schemars(description = "The URL to load (http:// or https://)")]
+    url: String,
+    #[schemars(description = "Page interactions to dispatch concurrently (Fill / Select / Check / Click)")]
+    actions: Vec<PageAction>,
+    #[schemars(description = "Maximum number of actions allowed in one call (default: 20)")]
+    max_actions: Option<usize>,
+    #[schemars(description = "Per-action retry timeout in ms for fields that may appear/enable later (default: 2000, max: 30000)")]
+    field_timeout_ms: Option<u64>,
+    #[schemars(description = "Connect to existing Chrome at this debug port instead of extracting cookies (opt-in)")]
+    debug_port: Option<u16>,
+    #[schemars(description = "Extra HTTP headers to send with every request")]
+    headers: Option<HashMap<String, String>>,
+}
+
 #[derive(Clone)]
 pub struct HtmlResourceServer {
     fetcher:         HtmlFetcher,
     form_handler:    FormHandler,
     session_handler: SessionHandler,
+    act_handler:     ActHandler,
     tool_router:     ToolRouter<Self>,
 }
 
@@ -132,6 +165,7 @@ impl HtmlResourceServer {
             fetcher:         HtmlFetcher::new(),
             form_handler:    FormHandler::default(),
             session_handler: SessionHandler::default(),
+            act_handler:     ActHandler::default(),
             tool_router:     Self::tool_router(),
         }
     }
@@ -262,6 +296,74 @@ impl HtmlResourceServer {
                     }
                 }
                 Ok(CallToolResult::success(items))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Dispatch a batch of page interactions (fill text, select dropdown, \
+                          toggle checkbox, click button) concurrently on a single page load. \
+                          Fill/Select/Check fire in parallel; Click fires after the others \
+                          settle. Per-action results returned even on partial failure. Use \
+                          for forms with multiple fields to avoid one-call-per-field overhead.")]
+    async fn act(
+        &self,
+        Parameters(ActParams {
+            url,
+            actions,
+            max_actions,
+            field_timeout_ms,
+            cookies,
+            headers,
+        }): Parameters<ActParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let options = into_request_options(cookies, headers);
+        match self
+            .act_handler
+            .handle_act(&url, actions, max_actions, field_timeout_ms, options)
+            .await
+        {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Like 'act' but runs in the persistent Chrome session opened by \
+                          read_page_with_session, using cookies extracted from the user's \
+                          Chrome profile. Use to interact with pages that require the user's \
+                          existing browser login. Never pass credentials as Fill values — \
+                          authentication is handled by the Chrome session.")]
+    async fn act_with_session(
+        &self,
+        Parameters(ActWithSessionParams {
+            url,
+            actions,
+            max_actions,
+            field_timeout_ms,
+            debug_port,
+            headers,
+        }): Parameters<ActWithSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .act_handler
+            .handle_act_with_session(
+                &url,
+                actions,
+                max_actions,
+                field_timeout_ms,
+                debug_port,
+                headers,
+            )
+            .await
+        {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result)
+                    .unwrap_or_else(|_| "{}".to_string());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }

@@ -12,6 +12,8 @@ pub enum HtmlError {
     ButtonNotFound(String),
     CookieExtractionError(String),
     SessionUnavailable(String),
+    NoActions,
+    TooManyActions { count: usize, max: usize },
 }
 
 impl fmt::Display for HtmlError {
@@ -29,6 +31,10 @@ impl fmt::Display for HtmlError {
             HtmlError::ButtonNotFound(l) => write!(f, "Button not found: '{}'", l),
             HtmlError::CookieExtractionError(msg) => write!(f, "{}", msg),
             HtmlError::SessionUnavailable(msg) => write!(f, "{}", msg),
+            HtmlError::NoActions => write!(f, "actions list must not be empty"),
+            HtmlError::TooManyActions { count, max } => {
+                write!(f, "actions list has {} items, exceeds max of {}", count, max)
+            }
         }
     }
 }
@@ -66,5 +72,19 @@ mod tests {
     fn test_button_not_found_display() {
         let e = HtmlError::ButtonNotFound("Continue".to_string());
         assert!(e.to_string().contains("Continue"));
+    }
+
+    #[test]
+    fn test_no_actions_display() {
+        let e = HtmlError::NoActions;
+        assert!(e.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_too_many_actions_display() {
+        let e = HtmlError::TooManyActions { count: 42, max: 20 };
+        let s = e.to_string();
+        assert!(s.contains("42"));
+        assert!(s.contains("20"));
     }
 }
