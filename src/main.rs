@@ -1,8 +1,9 @@
-use mcp_web_porter::mcp::FormHandler;
+use mcp_web_porter::mcp::{FormHandler, SessionHandler};
 use mcp_web_porter::HtmlResourceHandler as HtmlFetcher;
 use mcp_web_porter::operations::{fetch_html_with_options, fetch_html_with_images_options};
 use mcp_web_porter::types::{Cookie, FieldInput, RequestOptions, ResourceUri};
 use std::collections::HashMap;
+use base64::Engine;
 use rmcp::{
     ErrorData as McpError,
     RoleServer,
@@ -102,20 +103,36 @@ struct ClickButtonParams {
     headers: Option<HashMap<String, String>>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ReadPageWithSessionParams {
+    #[schemars(description = "The URL to fetch (http:// or https://)")]
+    url: String,
+    #[schemars(description = "Enable stealth mode to bypass bot detection")]
+    stealth: Option<bool>,
+    #[schemars(description = "Include images from the page as image content items (default: true)")]
+    include_images: Option<bool>,
+    #[schemars(description = "Connect to existing Chrome at this debug port instead of extracting cookies (opt-in)")]
+    debug_port: Option<u16>,
+    #[schemars(description = "Extra HTTP headers to send with every request")]
+    headers: Option<HashMap<String, String>>,
+}
+
 #[derive(Clone)]
 pub struct HtmlResourceServer {
-    fetcher:      HtmlFetcher,
-    form_handler: FormHandler,
-    tool_router:  ToolRouter<Self>,
+    fetcher:         HtmlFetcher,
+    form_handler:    FormHandler,
+    session_handler: SessionHandler,
+    tool_router:     ToolRouter<Self>,
 }
 
 #[tool_router]
 impl HtmlResourceServer {
     fn new() -> Self {
         Self {
-            fetcher:      HtmlFetcher::new(),
-            form_handler: FormHandler::default(),
-            tool_router:  Self::tool_router(),
+            fetcher:         HtmlFetcher::new(),
+            form_handler:    FormHandler::default(),
+            session_handler: SessionHandler::default(),
+            tool_router:     Self::tool_router(),
         }
     }
 
@@ -219,6 +236,32 @@ impl HtmlResourceServer {
                 let text = serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| "{}".to_string());
                 Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Fetch a webpage using the user's Chrome session cookies. Access pages that require authentication without manual credential entry. Automatically extracts cookies from Google Chrome's profile and injects them into a persistent browser session that lasts the entire Claude Code session. Set stealth=true to bypass bot detection. Images are returned as image content items (set include_images=false to skip).")]
+    async fn read_page_with_session(
+        &self,
+        Parameters(ReadPageWithSessionParams { url, stealth: _, include_images, debug_port: _, headers }): Parameters<ReadPageWithSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let include_images = include_images.unwrap_or(true);
+
+        match self.session_handler.handle_read_with_session(&url, false, include_images, None, headers).await {
+            Ok((content, image_urls)) => {
+                let mut items = vec![Content::text(content)];
+                let client = reqwest::Client::new();
+                for img_url in image_urls {
+                    if let Ok(response) = client.get(&img_url).send().await {
+                        if let Ok(bytes) = response.bytes().await {
+                            let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            let mime_type = "image/png".to_string();
+                            items.push(Content::image(base64_data, mime_type));
+                        }
+                    }
+                }
+                Ok(CallToolResult::success(items))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }

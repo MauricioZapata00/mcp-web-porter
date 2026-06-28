@@ -10,6 +10,8 @@ pub enum HtmlError {
     InvalidFieldValue { field: String, reason: String },
     SubmitFailed(String),
     ButtonNotFound(String),
+    CookieExtractionError(String),
+    SessionUnavailable(String),
 }
 
 impl fmt::Display for HtmlError {
@@ -25,6 +27,8 @@ impl fmt::Display for HtmlError {
             }
             HtmlError::SubmitFailed(m) => write!(f, "Form submission failed: {}", m),
             HtmlError::ButtonNotFound(l) => write!(f, "Button not found: '{}'", l),
+            HtmlError::CookieExtractionError(msg) => write!(f, "{}", msg),
+            HtmlError::SessionUnavailable(msg) => write!(f, "{}", msg),
         }
     }
 }

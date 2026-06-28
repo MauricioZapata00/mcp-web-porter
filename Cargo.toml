@@ -21,6 +21,32 @@ futures = "0.3.32"
 image = "0.25.9"
 base64 = "0.22.1"
 
+chrono = "0.4"
+url = "2.5"
+
+# Cookie extraction
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Crypto (RustCrypto)
+aes    = "0.9"
+cbc    = { version = "0.2", features = ["alloc"] }
+cipher = "0.5"
+pbkdf2 = { version = "0.13", features = ["hmac"] }
+hmac   = "0.13"
+sha1   = "0.11"
+
+# OS-specific
+dirs = "6"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+] }
+
 [dev-dependencies]
 tokio-test = "0.4.5"
 serial_test = "3.4.0"
