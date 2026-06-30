@@ -2,11 +2,12 @@ use std::collections::HashMap;
 
 use chromiumoxide::cdp::browser_protocol::network::{
     CookieParam as CdpCookieParam, Headers as CdpHeaders, SetExtraHttpHeadersParams,
+    TimeSinceEpoch,
 };
 
 use crate::browser::{
-    apply_request_options, detect_form_on_page, get_or_init_session, BrowserOps,
-    ChromeCookieExtractor, ChromiumBrowser, CookieExtractor,
+    apply_request_options, chrome_expires_to_unix_seconds, detect_form_on_page,
+    get_or_init_session, BrowserOps, ChromeCookieExtractor, ChromiumBrowser, CookieExtractor,
 };
 use crate::operations::act::{execute_actions_concurrent, validate_actions};
 use crate::operations::extract_text;
@@ -71,13 +72,18 @@ impl ActHandler {
         let cookie_extractor = ChromeCookieExtractor;
         let cookies = cookie_extractor.extract(url)?;
         for cookie in cookies {
-            let cdp_cookie = CdpCookieParam::builder()
+            let mut cdp_cookie = CdpCookieParam::builder()
                 .name(cookie.name)
                 .value(cookie.value)
                 .domain(cookie.host_key)
                 .path(cookie.path)
-                .secure(cookie.is_secure)
-                .build()
+                .secure(cookie.is_secure);
+
+            if let Some(expires) = chrome_expires_to_unix_seconds(cookie.expires_utc) {
+                cdp_cookie = cdp_cookie.expires(TimeSinceEpoch::new(expires));
+            }
+
+            let cdp_cookie = cdp_cookie.build()
                 .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
             page.set_cookie(cdp_cookie).await
                 .map_err(|e| HtmlError::BrowserError(format!("Failed to set cookie: {}", e)))?;

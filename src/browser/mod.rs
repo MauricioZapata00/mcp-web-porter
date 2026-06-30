@@ -9,4 +9,4 @@ pub(crate) use page::{
     fill_field_on_page,
 };
 pub(crate) use session::get_or_init_session;
-pub(crate) use cookies::{ChromeCookieExtractor, CookieExtractor};
+pub(crate) use cookies::{chrome_expires_to_unix_seconds, ChromeCookieExtractor, CookieExtractor};

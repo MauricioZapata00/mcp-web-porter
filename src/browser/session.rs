@@ -5,6 +5,7 @@ use futures::StreamExt;
 
 pub(crate) struct SessionState {
     pub browser: Browser,
+    #[allow(dead_code)]
     pub handler: tokio::task::JoinHandle<()>,
 }
 

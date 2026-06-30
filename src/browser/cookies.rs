@@ -115,6 +115,17 @@ pub(crate) fn default_cookies_path() -> Option<PathBuf> {
     }
 }
 
+pub(crate) fn chrome_expires_to_unix_seconds(expires_utc: i64) -> Option<f64> {
+    const CHROME_TO_UNIX_EPOCH_SECONDS: f64 = 11_644_473_600.0;
+
+    if expires_utc <= 0 {
+        return None;
+    }
+
+    let unix_seconds = (expires_utc as f64 / 1_000_000.0) - CHROME_TO_UNIX_EPOCH_SECONDS;
+    (unix_seconds > 0.0).then_some(unix_seconds)
+}
+
 fn decrypt_cookie_value(encrypted: &[u8]) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
@@ -136,8 +147,7 @@ fn decrypt_cookie_value(encrypted: &[u8]) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn decrypt_cookie_value_macos(encrypted: &[u8]) -> Option<String> {
-    use security_framework::passwords::SecPassword;
-    use security_framework::base::{Result as SecResult};
+    use security_framework::passwords::{generic_password, PasswordOptions};
 
     if encrypted.len() < 3 {
         return None;
@@ -150,10 +160,10 @@ fn decrypt_cookie_value_macos(encrypted: &[u8]) -> Option<String> {
 
     let cipher_text = &encrypted[3..];
 
-    let password = match SecPassword::find_generic_password(
-        Some("Chrome Safe Storage"),
-        Some("Chrome"),
-    ) {
+    let password = match generic_password(PasswordOptions::new_generic_password(
+        "Chrome Safe Storage",
+        "Chrome",
+    )) {
         Ok(pwd) => pwd,
         Err(_) => {
             eprintln!("Warning: could not retrieve Chrome Safe Storage password from Keychain");
@@ -161,7 +171,7 @@ fn decrypt_cookie_value_macos(encrypted: &[u8]) -> Option<String> {
         }
     };
 
-    let password_str = match password.to_string() {
+    let password_str = match String::from_utf8(password) {
         Ok(s) => s,
         Err(_) => return None,
     };

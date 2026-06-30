@@ -278,11 +278,12 @@ impl HtmlResourceServer {
     #[tool(description = "Fetch a webpage using the user's Chrome session cookies. Access pages that require authentication without manual credential entry. Automatically extracts cookies from Google Chrome's profile and injects them into a persistent browser session that lasts the entire Claude Code session. Set stealth=true to bypass bot detection. Images are returned as image content items (set include_images=false to skip).")]
     async fn read_page_with_session(
         &self,
-        Parameters(ReadPageWithSessionParams { url, stealth: _, include_images, debug_port: _, headers }): Parameters<ReadPageWithSessionParams>,
+        Parameters(ReadPageWithSessionParams { url, stealth, include_images, debug_port, headers }): Parameters<ReadPageWithSessionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let stealth = stealth.unwrap_or(false);
         let include_images = include_images.unwrap_or(true);
 
-        match self.session_handler.handle_read_with_session(&url, false, include_images, None, headers).await {
+        match self.session_handler.handle_read_with_session(&url, stealth, include_images, debug_port, headers).await {
             Ok((content, image_urls)) => {
                 let mut items = vec![Content::text(content)];
                 let client = reqwest::Client::new();

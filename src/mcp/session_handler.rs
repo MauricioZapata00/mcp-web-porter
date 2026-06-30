@@ -1,8 +1,12 @@
-use crate::browser::{ChromeCookieExtractor, CookieExtractor, get_or_init_session};
+use crate::browser::{
+    chrome_expires_to_unix_seconds, ChromeCookieExtractor, CookieExtractor, get_or_init_session,
+};
 use crate::operations::extract_text;
 use crate::types::{HtmlError, ResourceUri};
 use chromiumoxide::cdp::browser_protocol::network::CookieParam as CdpCookieParam;
-use chromiumoxide::cdp::browser_protocol::network::{Headers as CdpHeaders, SetExtraHttpHeadersParams};
+use chromiumoxide::cdp::browser_protocol::network::{
+    Headers as CdpHeaders, SetExtraHttpHeadersParams, TimeSinceEpoch,
+};
 use std::collections::HashMap;
 use serde_json;
 
@@ -13,12 +17,14 @@ impl SessionHandler {
     pub async fn handle_read_with_session(
         &self,
         url: &str,
-        _stealth: bool,
+        stealth: bool,
         include_images: bool,
-        _debug_port: Option<u16>,
+        debug_port: Option<u16>,
         headers: Option<HashMap<String, String>>,
     ) -> Result<(String, Vec<String>), HtmlError> {
         ResourceUri::parse(url)?;
+
+        let _ = (stealth, debug_port);
 
         let mut guard = get_or_init_session().await?;
         let session = guard.as_mut()
@@ -33,13 +39,18 @@ impl SessionHandler {
         let cookies = cookie_extractor.extract(url)?;
 
         for cookie in cookies {
-            let cdp_cookie = CdpCookieParam::builder()
+            let mut cdp_cookie = CdpCookieParam::builder()
                 .name(cookie.name)
                 .value(cookie.value)
                 .domain(cookie.host_key)
                 .path(cookie.path)
-                .secure(cookie.is_secure)
-                .build()
+                .secure(cookie.is_secure);
+
+            if let Some(expires) = chrome_expires_to_unix_seconds(cookie.expires_utc) {
+                cdp_cookie = cdp_cookie.expires(TimeSinceEpoch::new(expires));
+            }
+
+            let cdp_cookie = cdp_cookie.build()
                 .map_err(|e| HtmlError::BrowserError(e.to_string()))?;
 
             page.set_cookie(cdp_cookie).await
